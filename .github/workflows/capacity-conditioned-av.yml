@@ -25,10 +25,11 @@ jobs:
       - name: Install Python analysis dependencies
         run: python3 -m pip install -r requirements.txt
 
-      - name: Run compact fixed-versus-elastic sweep
+      - name: Run Window-fraction stress sweep
         env:
           MODES: "fixed elastic"
-          CAPACITY_FRACTIONS: "0.01 0.05 0.20"
+          CAPACITY_FRACTIONS: "0.05"
+          WINDOW_FRACTIONS: "0.01 0.05 0.10 0.20 0.40"
           REQUESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.requests || '100000' }}
         run: |
           chmod +x run_sweep.sh
