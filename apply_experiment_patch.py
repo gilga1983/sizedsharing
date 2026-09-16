@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
@@ -17,6 +15,17 @@ base = src / "simulator/src/main/java/com/github/benmanes/caffeine/cache/simulat
 sized = base / "SizedWindowTinyLfuPolicy.java"
 sum_sized = base / "SumSizedWindowTinyLfuPolicy.java"
 reference = src / "simulator/src/main/resources/reference.conf"
+build = src / "build.gradle"
+
+# The historical bnd plugin is packaging/OSGi machinery. Its 2019-era plugin
+# dependency no longer resolves cleanly on current runners and is not needed to
+# compile or execute the simulator. Guard the exact line so an upstream change
+# cannot silently alter what this experiment builds.
+replace_once(
+    build,
+    "  apply plugin: 'biz.aQute.bnd.builder'\n",
+    "  // SizedSharing simulator-only build: obsolete bnd packaging plugin disabled.\n",
+)
 
 replace_once(
     sized,
@@ -60,4 +69,4 @@ replace_once(
     '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n    admission-multiplier = 1.0\n  }\n''',
 )
 
-print("Applied capacity-conditioned AV source transformation successfully.")
+print("Applied simulator-only build fix and capacity-conditioned AV source transformation successfully.")
