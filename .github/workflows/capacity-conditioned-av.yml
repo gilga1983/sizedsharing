@@ -1,17 +1,19 @@
-name: Capacity-conditioned AV
+name: Capacity-conditioned AV smoke test
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       requests:
-        description: "Wiki2018 prefix requests"
+        description: "Synthetic requests"
         required: true
-        default: "1000000"
+        default: "200000"
 
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -21,17 +23,22 @@ jobs:
           java-version: "11"
 
       - name: Install Python analysis dependencies
-        run: python3 -m pip install pandas matplotlib
+        run: python3 -m pip install -r requirements.txt
 
-      - name: Run sweep
+      - name: Run compact synthetic sweep
+        env:
+          LAMBDAS: "0.50 1.00 2.00"
+          CAPACITY_FRACTIONS: "0.01 0.05 0.20"
+          REQUESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.requests || '100000' }}
         run: |
           chmod +x run_sweep.sh
-          ./run_sweep.sh --download-wiki --requests "${{ inputs.requests }}"
+          ./run_sweep.sh --synthetic --requests "$REQUESTS"
 
       - name: Analyze
         run: python3 analyze.py results
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: capacity-conditioned-av-results
+          name: capacity-conditioned-av-smoke-results
           path: results/
