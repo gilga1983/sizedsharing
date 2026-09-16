@@ -16,6 +16,9 @@ sized = base / "SizedWindowTinyLfuPolicy.java"
 sum_sized = base / "SumSizedWindowTinyLfuPolicy.java"
 reference = src / "simulator/src/main/resources/reference.conf"
 build = src / "build.gradle"
+simulator_build = src / "simulator/build.gradle"
+registry = src / "simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/Registry.java"
+collision_policy = src / "simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/product/CollisionPolicy.java"
 
 # The historical bnd plugin is packaging/OSGi machinery. Its 2019-era plugin
 # dependency no longer resolves cleanly on current runners and is not needed to
@@ -26,6 +29,29 @@ replace_once(
     "  apply plugin: 'biz.aQute.bnd.builder'\n",
     "  // SizedSharing simulator-only build: obsolete bnd packaging plugin disabled.\n",
 )
+
+# Collision is an unrelated product policy whose historical dependency was
+# hosted on the now-retired Bintray/JCenter infrastructure. Remove only its
+# compile-time hooks so the AV simulator can build without changing cache logic.
+replace_once(
+    simulator_build,
+    "  implementation libraries.collision\n",
+    "  // SizedSharing simulator-only build: unavailable Collision dependency omitted.\n",
+)
+replace_once(
+    registry,
+    "import com.github.benmanes.caffeine.cache.simulator.policy.product.CollisionPolicy;\n",
+    "",
+)
+replace_once(
+    registry,
+    '    factories.put("product.Collision", CollisionPolicy::policies);\n',
+    "",
+)
+collision_text = collision_policy.read_text()
+if "systems.comodal.collision.cache.CollisionBuilder" not in collision_text:
+    raise RuntimeError("Historical CollisionPolicy.java did not match expected dependency")
+collision_policy.unlink()
 
 replace_once(
     sized,
@@ -69,4 +95,4 @@ replace_once(
     '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n    admission-multiplier = 1.0\n  }\n''',
 )
 
-print("Applied simulator-only build fix and capacity-conditioned AV source transformation successfully.")
+print("Applied simulator-only compatibility fixes and capacity-conditioned AV source transformation successfully.")
