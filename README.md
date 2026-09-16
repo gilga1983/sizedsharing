@@ -34,17 +34,21 @@ Cache capacities default to:
 
 of the unique-byte footprint of the trace prefix.
 
-The harness patches the exact historical `ohadeytan/caffeine:arXiv_submission` implementation rather than reimplementing AV.
+The harness checks out the exact historical `ohadeytan/caffeine:arXiv_submission` implementation and applies a checked source transformation. Every expected historical code fragment must match exactly before the experiment edits it.
 
-## Run
+## Quick CI smoke test
 
-For a public smoke test using a Wiki2018 prefix:
+The GitHub Actions workflow runs a compact deterministic synthetic sized-object trace on every push. This validates the historical checkout, transformation, build, sweep, CSV parsing, and plotting. Synthetic results are for plumbing only, not for research claims.
+
+Locally:
 
 ```bash
 chmod +x run_sweep.sh
-./run_sweep.sh --download-wiki --requests 1000000
+./run_sweep.sh --synthetic --requests 200000
 python3 analyze.py results
 ```
+
+## Real traces
 
 For an existing AdaptSize-format trace:
 
@@ -59,6 +63,8 @@ Trace format:
 time object_id size_bytes [optional fields...]
 ```
 
+The intended research progression is Wiki2018 and the sized-cache traces, followed by IBM005/IBM058 from the Prefix Caching evaluation.
+
 ## Outputs
 
 The analysis produces:
@@ -70,6 +76,10 @@ The analysis produces:
 - `results/gain_over_original.png`
 
 Both object hit rate and weighted/byte hit rate are retained.
+
+## Identity check
+
+Before interpreting real results, compare a patched `lambda=1` run against an unmodified historical AV run at the same trace and capacity. Hits, misses, admissions, and evictions should match exactly.
 
 ## Interpretation
 
