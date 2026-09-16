@@ -3,7 +3,7 @@ set -euo pipefail
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/ohadeytan/caffeine.git}"
 UPSTREAM_REF="${UPSTREAM_REF:-arXiv_submission}"
-LAMBDAS="${LAMBDAS:-0.25 0.50 0.75 1.00 1.25 1.50 2.00 3.00 4.00}"
+MODES="${MODES:-fixed elastic}"
 CAPACITY_FRACTIONS="${CAPACITY_FRACTIONS:-0.005 0.01 0.02 0.05 0.10 0.20 0.40}"
 REQUESTS=1000000
 TRACE=""
@@ -67,7 +67,7 @@ git -C "$SRC" fetch origin "$UPSTREAM_REF"
 git -C "$SRC" checkout -B "$UPSTREAM_REF" "origin/$UPSTREAM_REF"
 git -C "$SRC" clean -fdx
 
-echo "[patch] applying checked capacity-conditioned AV transformation"
+echo "[patch] applying checked minimal elastic-buffer transformation"
 (cd "$SRC" && python3 "$ROOT/apply_experiment_patch.py")
 
 read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
@@ -111,10 +111,16 @@ echo "[build] compiling patched simulator"
 
 while IFS=, read -r F CAP; do
   [[ "$F" == "fraction" ]] && continue
-  for L in $LAMBDAS; do
-    TAG="f${F}_c${CAP}_l${L}"
+  for MODE in $MODES; do
+    case "$MODE" in
+      fixed) ELASTIC=false ;;
+      elastic) ELASTIC=true ;;
+      *) echo "Unknown mode: $MODE"; exit 2 ;;
+    esac
+
+    TAG="f${F}_c${CAP}_${MODE}"
     OUT="$RESULTS/${TAG}.csv"
-    echo "[run] fraction=$F capacity=$CAP lambda=$L"
+    echo "[run] fraction=$F capacity=$CAP mode=$MODE"
 
     cat > "$APP_CONF" <<EOF
 caffeine {
@@ -133,7 +139,7 @@ caffeine {
       scaled = false
       bump = true
       prune = true
-      admission-multiplier = $L
+      elastic-buffer = $ELASTIC
     }
     window-tiny-lfu {
       percent-main = [0.99]
@@ -154,8 +160,8 @@ EOF
 
     (cd "$SRC" && ./gradlew simulator:run -q </dev/null)
 
-    printf '{"fraction": %s, "capacity_bytes": %s, "lambda": %s, "csv": "%s"}\n' \
-      "$F" "$CAP" "$L" "$(basename "$OUT")" > "$RESULTS/${TAG}.json"
+    printf '{"fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s"}\n' \
+      "$F" "$CAP" "$MODE" "$(basename "$OUT")" > "$RESULTS/${TAG}.json"
   done
 done < "$CAP_META"
 
