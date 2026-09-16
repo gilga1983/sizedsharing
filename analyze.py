@@ -10,7 +10,7 @@ import pandas as pd
 results = Path(sys.argv[1] if len(sys.argv) > 1 else "results")
 rows = []
 
-for sidecar in sorted(results.glob("f*_c*_l*.json")):
+for sidecar in sorted(results.glob("f*_c*_*.json")):
     meta = json.loads(sidecar.read_text())
     csv_path = results / meta["csv"]
     if not csv_path.exists():
@@ -23,7 +23,7 @@ for sidecar in sorted(results.glob("f*_c*_l*.json")):
     rows.append({
         "capacity_fraction": float(meta["fraction"]),
         "capacity_bytes": int(meta["capacity_bytes"]),
-        "lambda": float(meta["lambda"]),
+        "mode": meta["mode"],
         "policy": r.get("Policy", ""),
         "hit_rate": float(r["Hit rate"]),
         "weighted_hit_rate": float(r["Weighted Hit Rate"]),
@@ -38,68 +38,65 @@ for sidecar in sorted(results.glob("f*_c*_l*.json")):
 if not rows:
     raise SystemExit(f"No completed runs found under {results}")
 
-df = pd.DataFrame(rows).sort_values(["capacity_bytes", "lambda"])
+df = pd.DataFrame(rows).sort_values(["capacity_bytes", "mode"])
 df.to_csv(results / "all_results.csv", index=False)
 
-best_idx = df.groupby("capacity_bytes")["hit_rate"].idxmax()
-best = df.loc[best_idx].copy().sort_values("capacity_bytes")
-
-baseline = (
-    df[df["lambda"].sub(1.0).abs() < 1e-12]
-    [["capacity_bytes", "hit_rate", "weighted_hit_rate"]]
+fixed = (
+    df[df["mode"] == "fixed"]
+    [["capacity_fraction", "capacity_bytes", "hit_rate", "weighted_hit_rate",
+      "evictions", "admit_rate", "runtime_ms"]]
     .rename(columns={
-        "hit_rate": "baseline_hit_rate",
-        "weighted_hit_rate": "baseline_weighted_hit_rate",
+        "hit_rate": "fixed_hit_rate",
+        "weighted_hit_rate": "fixed_weighted_hit_rate",
+        "evictions": "fixed_evictions",
+        "admit_rate": "fixed_admit_rate",
+        "runtime_ms": "fixed_runtime_ms",
     })
 )
-best = best.merge(baseline, on="capacity_bytes", how="left")
-best["gain_pp"] = best["hit_rate"] - best["baseline_hit_rate"]
-best["weighted_gain_pp"] = (
-    best["weighted_hit_rate"] - best["baseline_weighted_hit_rate"]
+elastic = (
+    df[df["mode"] == "elastic"]
+    [["capacity_fraction", "capacity_bytes", "hit_rate", "weighted_hit_rate",
+      "evictions", "admit_rate", "runtime_ms"]]
+    .rename(columns={
+        "hit_rate": "elastic_hit_rate",
+        "weighted_hit_rate": "elastic_weighted_hit_rate",
+        "evictions": "elastic_evictions",
+        "admit_rate": "elastic_admit_rate",
+        "runtime_ms": "elastic_runtime_ms",
+    })
 )
-best.to_csv(results / "best_by_capacity.csv", index=False)
+comparison = fixed.merge(elastic, on=["capacity_fraction", "capacity_bytes"], how="inner")
+comparison["hit_gain_pp"] = comparison["elastic_hit_rate"] - comparison["fixed_hit_rate"]
+comparison["weighted_hit_gain_pp"] = (
+    comparison["elastic_weighted_hit_rate"] - comparison["fixed_weighted_hit_rate"]
+)
+comparison.to_csv(results / "elastic_vs_fixed.csv", index=False)
 
-print("\nBest lambda by capacity (object hit rate):")
-show = best[
-    ["capacity_fraction", "capacity_bytes", "lambda",
-     "hit_rate", "baseline_hit_rate", "gain_pp",
-     "weighted_hit_rate", "weighted_gain_pp"]
-]
-print(show.to_string(index=False))
-
-fig, ax = plt.subplots()
-ax.plot(best["capacity_fraction"] * 100, best["lambda"], marker="o")
-ax.axhline(1.0, linestyle="--")
-ax.set_xlabel("Cache capacity (% of unique-byte footprint)")
-ax.set_ylabel("Best admission multiplier lambda")
-ax.set_title("Capacity-conditioned AV: best lambda")
-fig.tight_layout()
-fig.savefig(results / "best_lambda_vs_capacity.png", dpi=180)
-plt.close(fig)
-
-pivot = df.pivot(index="lambda", columns="capacity_fraction", values="hit_rate")
-fig, ax = plt.subplots()
-im = ax.imshow(pivot.values, aspect="auto", origin="lower")
-ax.set_xticks(range(len(pivot.columns)))
-ax.set_xticklabels([f"{100*x:g}%" for x in pivot.columns])
-ax.set_yticks(range(len(pivot.index)))
-ax.set_yticklabels([f"{x:g}" for x in pivot.index])
-ax.set_xlabel("Cache capacity")
-ax.set_ylabel("lambda")
-ax.set_title("Object hit rate (%)")
-fig.colorbar(im, ax=ax, label="Hit rate (%)")
-fig.tight_layout()
-fig.savefig(results / "object_hit_heatmap.png", dpi=180)
-plt.close(fig)
+print("\nElastic buffer versus fixed 1%/99% partition:")
+print(comparison[[
+    "capacity_fraction", "capacity_bytes",
+    "fixed_hit_rate", "elastic_hit_rate", "hit_gain_pp",
+    "fixed_weighted_hit_rate", "elastic_weighted_hit_rate", "weighted_hit_gain_pp",
+]].to_string(index=False))
 
 fig, ax = plt.subplots()
-ax.plot(best["capacity_fraction"] * 100, best["gain_pp"], marker="o")
+ax.plot(comparison["capacity_fraction"] * 100, comparison["hit_gain_pp"], marker="o")
 ax.axhline(0.0, linestyle="--")
 ax.set_xlabel("Cache capacity (% of unique-byte footprint)")
-ax.set_ylabel("Gain over lambda=1 (percentage points)")
-ax.set_title("Value of capacity-conditioned admission")
+ax.set_ylabel("Elastic gain in object hit rate (percentage points)")
+ax.set_title("Sized W-TinyLFU: elastic vs fixed partition")
 fig.tight_layout()
-fig.savefig(results / "gain_over_original.png", dpi=180)
+fig.savefig(results / "elastic_object_hit_gain.png", dpi=180)
+plt.close(fig)
+
+fig, ax = plt.subplots()
+ax.plot(comparison["capacity_fraction"] * 100, comparison["weighted_hit_gain_pp"], marker="o")
+ax.axhline(0.0, linestyle="--")
+ax.set_xlabel("Cache capacity (% of unique-byte footprint)")
+ax.set_ylabel("Elastic gain in weighted hit rate (percentage points)")
+ax.set_title("Sized W-TinyLFU: byte-hit impact of elastic sharing")
+fig.tight_layout()
+fig.savefig(results / "elastic_weighted_hit_gain.png", dpi=180)
 plt.close(fig)
 
 print(f"\nWrote results and plots to: {results.resolve()}")
