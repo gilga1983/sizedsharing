@@ -49,8 +49,8 @@ collision_policy.unlink()
 # Minimal elastic-buffer switch. The historical Window/Main policy remains the
 # same; only byte ownership becomes soft. Borrowing is deliberately bounded:
 # Window may use one variable-size overshoot while Main has slack, but if Window
-# is already borrowing when the next miss arrives it must hand old bytes toward
-# Main instead of growing again.
+# is already borrowing when the next miss arrives it must return to its nominal
+# byte entitlement before keeping the new insertion.
 replace_once(
     sized,
     '''  protected final boolean bump;\n  protected final boolean prune;  \n''',
@@ -111,15 +111,15 @@ replace_once(
     '''  protected void coreEviction(Node candidate) {\n    long bytesNeeded = bytesNeededForCandidate(candidate);\n    if (elasticBuffer && bytesNeeded > (sizeData - sizeWindow)) {\n      reject(candidate);\n      return;\n    }\n    Node victim = getVictim();\n    victimsCount++;\n    if (compare(sketch.frequency(candidate.key), candidate.weight, sketch.frequency(victim.key), victim.weight)) {\n      victimsCount--;\n      while (candidateExceedsCapacity(candidate)) {\n        Node evict = getVictim();\n        victimsCount++;\n        evictNode(evict);\n      }\n      admit(candidate);\n    } else {\n''',
 )
 
-# Bounded Window borrowing is the key semantic. A Window at/below its nominal
-# allocation may keep one overshoot if the global cache still has free bytes.
-# On the next miss, if it was already borrowing, it transfers enough LRU bytes
-# toward Main to avoid increasing that borrowed occupancy. This prevents the
-# warm-up behavior where Window grows into a giant LRU.
+# A Window at/below its nominal allocation may keep one overshoot when global
+# capacity is available. That borrowed occupancy is weak ownership: if another
+# miss arrives while Window is borrowing, it transfers enough LRU bytes toward
+# Main to return to its nominal reservation. It may borrow again only after it
+# has first surrendered the previous borrow.
 replace_once(
     sized,
     '''  private void collectCandidates(final Node headCandidates) {\n    while (sizeWindow > maxWindow) {\n      Node candidate = headWindow.next;\n      candidate.status = Status.PROBATION;\n      sizeWindow -= candidate.weight;\n      sizeData -= candidate.weight;\n      candidate.remove();\n      candidate.appendToTail(headCandidates);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
-    '''  private void collectCandidates(final Node headCandidates, long windowSizeBeforeMiss) {\n    if (!elasticBuffer) {\n      while (sizeWindow > maxWindow) {\n        detachWindowCandidate(headCandidates);\n      }\n      return;\n    }\n\n    boolean wasBorrowing = windowSizeBeforeMiss > maxWindow;\n    if (wasBorrowing) {\n      while (sizeWindow > windowSizeBeforeMiss) {\n        detachWindowCandidate(headCandidates);\n      }\n    } else if (sizeData > maximumSize) {\n      // There is no free global capacity to finance a fresh Window overshoot.\n      while (sizeWindow > maxWindow) {\n        detachWindowCandidate(headCandidates);\n      }\n    }\n    // Otherwise Window may keep this one variable-size overshoot. If another\n    // miss arrives while it is borrowing, the branch above makes it yield.\n  }\n\n  private void detachWindowCandidate(final Node headCandidates) {\n    Node candidate = headWindow.next;\n    candidate.status = Status.PROBATION;\n    sizeWindow -= candidate.weight;\n    sizeData -= candidate.weight;\n    candidate.remove();\n    candidate.appendToTail(headCandidates);\n  }\n\n  /** True if admitting this detached Window candidate would exceed its capacity. */\n  protected boolean candidateExceedsCapacity(Node candidate) {\n    if (elasticBuffer) {\n      return (sizeData + candidate.weight) > maximumSize;\n    }\n    return (sizeData + candidate.weight - sizeWindow) > maxMain;\n  }\n\n  /** Bytes that must be reclaimed before this detached candidate can be admitted. */\n  protected long bytesNeededForCandidate(Node candidate) {\n    if (elasticBuffer) {\n      return Math.max(0L, (sizeData + candidate.weight) - maximumSize);\n    }\n    return Math.max(0L, (sizeData + candidate.weight - sizeWindow) - maxMain);\n  }\n\n  private void sampleOccupancy() {\n    long mainSize = sizeData - sizeWindow;\n    occupancySamples++;\n    totalOccupancySum += sizeData;\n    windowOccupancySum += sizeWindow;\n    mainOccupancySum += mainSize;\n\n    long windowBorrow = Math.max(0L, sizeWindow - maxWindow);\n    long mainBorrow = Math.max(0L, mainSize - maxMain);\n    if (windowBorrow > 0) {\n      windowBorrowSamples++;\n      maxWindowBorrowBytes = Math.max(maxWindowBorrowBytes, windowBorrow);\n    }\n    if (mainBorrow > 0) {\n      mainBorrowSamples++;\n      maxMainBorrowBytes = Math.max(maxMainBorrowBytes, mainBorrow);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
+    '''  private void collectCandidates(final Node headCandidates, long windowSizeBeforeMiss) {\n    if (!elasticBuffer) {\n      while (sizeWindow > maxWindow) {\n        detachWindowCandidate(headCandidates);\n      }\n      return;\n    }\n\n    boolean wasBorrowing = windowSizeBeforeMiss > maxWindow;\n    if (wasBorrowing) {\n      while (sizeWindow > maxWindow) {\n        detachWindowCandidate(headCandidates);\n      }\n    } else if (sizeData > maximumSize) {\n      // There is no free global capacity to finance a fresh Window overshoot.\n      while (sizeWindow > maxWindow) {\n        detachWindowCandidate(headCandidates);\n      }\n    }\n    // Otherwise this request may temporarily keep one variable-size overshoot.\n  }\n\n  private void detachWindowCandidate(final Node headCandidates) {\n    Node candidate = headWindow.next;\n    candidate.status = Status.PROBATION;\n    sizeWindow -= candidate.weight;\n    sizeData -= candidate.weight;\n    candidate.remove();\n    candidate.appendToTail(headCandidates);\n  }\n\n  /** True if admitting this detached Window candidate would exceed its capacity. */\n  protected boolean candidateExceedsCapacity(Node candidate) {\n    if (elasticBuffer) {\n      return (sizeData + candidate.weight) > maximumSize;\n    }\n    return (sizeData + candidate.weight - sizeWindow) > maxMain;\n  }\n\n  /** Bytes that must be reclaimed before this detached candidate can be admitted. */\n  protected long bytesNeededForCandidate(Node candidate) {\n    if (elasticBuffer) {\n      return Math.max(0L, (sizeData + candidate.weight) - maximumSize);\n    }\n    return Math.max(0L, (sizeData + candidate.weight - sizeWindow) - maxMain);\n  }\n\n  private void sampleOccupancy() {\n    long mainSize = sizeData - sizeWindow;\n    occupancySamples++;\n    totalOccupancySum += sizeData;\n    windowOccupancySum += sizeWindow;\n    mainOccupancySum += mainSize;\n\n    long windowBorrow = Math.max(0L, sizeWindow - maxWindow);\n    long mainBorrow = Math.max(0L, mainSize - maxMain);\n    if (windowBorrow > 0) {\n      windowBorrowSamples++;\n      maxWindowBorrowBytes = Math.max(maxWindowBorrowBytes, windowBorrow);\n    }\n    if (mainBorrow > 0) {\n      mainBorrowSamples++;\n      maxMainBorrowBytes = Math.max(maxMainBorrowBytes, mainBorrow);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
 )
 
 # Report measurement-only occupancy data in a machine-readable line. This is
@@ -157,4 +157,4 @@ replace_once(
     '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n    elastic-buffer = false\n  }\n''',
 )
 
-print("Applied simulator compatibility fixes and bounded elastic Window/Main sharing successfully.")
+print("Applied simulator compatibility fixes and reclaim-on-next-miss elastic sharing successfully.")
