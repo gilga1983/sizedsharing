@@ -67,7 +67,7 @@ git -C "$SRC" fetch origin "$UPSTREAM_REF"
 git -C "$SRC" checkout -B "$UPSTREAM_REF" "origin/$UPSTREAM_REF"
 git -C "$SRC" clean -fdx
 
-echo "[patch] applying checked minimal elastic-buffer transformation"
+echo "[patch] applying checked bounded elastic-buffer transformation"
 (cd "$SRC" && python3 "$ROOT/apply_experiment_patch.py")
 
 read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
@@ -120,6 +120,7 @@ while IFS=, read -r F CAP; do
 
     TAG="f${F}_c${CAP}_${MODE}"
     OUT="$RESULTS/${TAG}.csv"
+    LOG="$RESULTS/${TAG}.log"
     echo "[run] fraction=$F capacity=$CAP mode=$MODE"
 
     cat > "$APP_CONF" <<EOF
@@ -158,10 +159,10 @@ caffeine {
 }
 EOF
 
-    (cd "$SRC" && ./gradlew simulator:run -q </dev/null)
+    (cd "$SRC" && ./gradlew simulator:run -q </dev/null) | tee "$LOG"
 
-    printf '{"fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s"}\n' \
-      "$F" "$CAP" "$MODE" "$(basename "$OUT")" > "$RESULTS/${TAG}.json"
+    printf '{"fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s", "log": "%s"}\n' \
+      "$F" "$CAP" "$MODE" "$(basename "$OUT")" "$(basename "$LOG")" > "$RESULTS/${TAG}.json"
   done
 done < "$CAP_META"
 
