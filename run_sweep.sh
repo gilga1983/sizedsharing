@@ -69,6 +69,8 @@ git -C "$SRC" clean -fdx
 
 echo "[patch] applying checked bounded elastic-buffer transformation"
 (cd "$SRC" && python3 "$ROOT/apply_experiment_patch.py")
+echo "[patch] preserving historical AV admission while sharing physical slack"
+(cd "$SRC" && python3 "$ROOT/apply_policy_preserving_elastic.py")
 
 read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
 import sys
