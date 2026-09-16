@@ -6,6 +6,9 @@ UPSTREAM_REF="${UPSTREAM_REF:-arXiv_submission}"
 MODES="${MODES:-fixed elastic}"
 CAPACITY_FRACTIONS="${CAPACITY_FRACTIONS:-0.005 0.01 0.02 0.05 0.10 0.20 0.40}"
 WINDOW_FRACTIONS="${WINDOW_FRACTIONS:-0.01}"
+SYNTHETIC_SIZE_MODE="${SYNTHETIC_SIZE_MODE:-lognormal}"
+SYNTHETIC_CONSTANT_SIZE="${SYNTHETIC_CONSTANT_SIZE:-32768}"
+CAPACITY_ALIGNMENT_BYTES="${CAPACITY_ALIGNMENT_BYTES:-0}"
 REQUESTS=1000000
 TRACE=""
 DOWNLOAD_WIKI=0
@@ -34,8 +37,12 @@ rm -rf "$RESULTS"
 mkdir -p "$RESULTS"
 
 if [[ $SYNTHETIC -eq 1 ]]; then
-  TRACE="$WORK/synthetic_${REQUESTS}.tr"
-  python3 "$ROOT/generate_synthetic.py" --output "$TRACE" --requests "$REQUESTS"
+  TRACE="$WORK/synthetic_${SYNTHETIC_SIZE_MODE}_${REQUESTS}.tr"
+  python3 "$ROOT/generate_synthetic.py" \
+    --output "$TRACE" \
+    --requests "$REQUESTS" \
+    --size-mode "$SYNTHETIC_SIZE_MODE" \
+    --constant-size "$SYNTHETIC_CONSTANT_SIZE"
 fi
 
 if [[ $DOWNLOAD_WIKI -eq 1 ]]; then
@@ -96,10 +103,13 @@ echo "[trace] requests=$REQUEST_COUNT unique_bytes=$UNIQUE_BYTES"
 CAP_META="$RESULTS/capacities.csv"
 echo "fraction,capacity_bytes" > "$CAP_META"
 for F in $CAPACITY_FRACTIONS; do
-  CAP="$(python3 - "$UNIQUE_BYTES" "$F" <<'PY'
+  CAP="$(python3 - "$UNIQUE_BYTES" "$F" "$CAPACITY_ALIGNMENT_BYTES" <<'PY'
 import sys
-u = int(sys.argv[1]); f = float(sys.argv[2])
-print(max(1, int(round(u * f))))
+u = int(sys.argv[1]); f = float(sys.argv[2]); alignment = int(sys.argv[3])
+cap = max(1, int(round(u * f)))
+if alignment > 0:
+    cap = max(alignment, (cap // alignment) * alignment)
+print(cap)
 PY
 )"
   echo "$F,$CAP" >> "$CAP_META"
