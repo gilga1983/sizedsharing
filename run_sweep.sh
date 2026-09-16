@@ -65,8 +65,8 @@ git -C "$SRC" fetch origin "$UPSTREAM_REF"
 git -C "$SRC" checkout -B "$UPSTREAM_REF" "origin/$UPSTREAM_REF"
 git -C "$SRC" clean -fdx
 
-echo "[patch] applying capacity-conditioned AV"
-git -C "$SRC" apply "$ROOT/capacity_conditioned_av.patch"
+echo "[patch] applying checked capacity-conditioned AV transformation"
+(cd "$SRC" && python3 "$ROOT/apply_experiment_patch.py")
 
 read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
 import sys
