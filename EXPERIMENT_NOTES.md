@@ -1,96 +1,59 @@
 # Experiment notes
 
-## Exact historical code point
+## Scope
 
-The AV implementation is:
+This experiment changes one thing only: the hard internal byte partition between the Window and Main regions of historical sized W-TinyLFU becomes elastic.
 
-`simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SumSizedWindowTinyLfuPolicy.java`
+There is no predictor, prefetcher, mapper, controller, lambda tuning, or window-size adaptation. Aggregated Victims uses its historical admission comparison (`lambda = 1`).
 
-It accumulates the frequencies of enough victims to make room for the candidate and then calls the inherited `compare(...)`.
+## Historical code point
 
-For `scaled=false`, the inherited rule is:
+The cache is `SumSizedWindowTinyLfuPolicy` on `ohadeytan/caffeine:arXiv_submission`.
 
-```text
-candidateFreq >= victimFreq
-```
-
-where `victimFreq` is the aggregate victim frequency supplied by AV.
-
-The historical configuration exposes:
+Historically:
 
 ```text
-sized-window-tiny-lfu {
-  scaled = false
-  bump = false
-  prune = true
-}
+maxWindow = 1% of M
+maxMain   = 99% of M
 ```
 
-and standard W-TinyLFU uses:
+and both are hard internal limits.
+
+The elastic variant keeps those values as nominal reservations while enforcing only:
 
 ```text
-window-tiny-lfu {
-  percent-main = [0.99]
-  percent-main-protected = 0.80
-}
+bytes(Window) + bytes(Main) <= M
 ```
 
-The old experiment-specific `application.conf` set `bump=true`, so Phase 1 preserves that setup.
+## Borrowing semantics
 
-## Why pruning must also change
+Window may exceed its nominal byte reservation while Main has unused capacity. Main may exceed its nominal reservation while Window has unused capacity.
 
-The original AV code can stop gathering victims early when:
+No action is taken simply because one region exceeds its nominal reservation. Reclamation happens only when the total cache exceeds `M`.
+
+If total usage exceeds `M` and Window is above its nominal reservation, the oldest Window item enters the existing sized W-TinyLFU / Aggregated Victims candidate path. AV remains unchanged except that the number of bytes that must be reclaimed is computed against the global limit in elastic mode.
+
+If total usage exceeds `M` while Window is at or below its nominal reservation, Main is using borrowed Window bytes, so Main victims are evicted only until the global limit is restored.
+
+Objects larger than the nominal Main partition are rejected in fixed mode as before. In elastic mode an object may use the cache as long as it fits within the total cache capacity `M`.
+
+## Controlled comparison
+
+For every trace and total capacity, compare:
 
 ```text
-victimsFreq > candidateFreq
+fixed   : historical hard 1% / 99% partition
+elastic : same nominal 1% / 99% split with bidirectional borrowing
 ```
 
-because for `lambda=1` that already proves the candidate will be rejected.
+Everything else remains identical.
 
-If the admission threshold becomes
+Primary metrics:
 
-```text
-candidateFreq >= lambda * victimsFreq
-```
+1. object hit rate;
+2. weighted / byte hit rate;
+3. evictions and admission rate as diagnostics.
 
-the corresponding safe stopping condition is
+## Validation
 
-```text
-candidateFreq < lambda * victimsFreq
-```
-
-Changing the final admission test without changing pruning would bias the experiment, especially for `lambda < 1`.
-
-## Phase 1 intentionally avoids adaptive window sizing
-
-Window adaptation is established prior work and would make attribution muddy. We first ask whether AV's exchange rate has a capacity-dependent optimum with the same 1% window everywhere.
-
-If yes, Phase 2 can sweep:
-
-```text
-U(C, lambda, w)
-```
-
-where `w` is the W-TinyLFU window fraction.
-
-## Identity check
-
-Before interpreting results, compare one `lambda=1` patched run against an unpatched historical checkout at the same trace and capacity. Hits, misses, admissions, and evictions should match exactly.
-
-## Recommended progression
-
-1. 1M Wiki2018 requests: smoke test and code validation.
-2. 5M to 10M Wiki2018: check whether the surface stabilizes.
-3. Full Wiki2018: real result.
-4. IBM005 and IBM058: especially interesting because previous experiments exposed non-monotonic behavior as cache capacity increased.
-5. Original size-aware paper traces if still available: direct continuity with the earlier result.
-
-## Success criterion
-
-Do not treat one noisy optimum as evidence. The signal becomes interesting if:
-
-1. the best `lambda` differs from 1 at multiple adjacent capacities;
-2. the direction is systematic with capacity or workload scarcity;
-3. the gain over `lambda=1` is material;
-4. the effect appears on multiple real traces;
-5. object-hit improvement does not merely trade away byte efficiency.
+The `fixed` configuration must reproduce the historical sized W-TinyLFU / AV behavior. Synthetic CI is only a plumbing check. Real conclusions should come from sized-object traces.
