@@ -9,6 +9,7 @@ WINDOW_FRACTIONS="${WINDOW_FRACTIONS:-0.01}"
 SYNTHETIC_SIZE_MODE="${SYNTHETIC_SIZE_MODE:-lognormal}"
 SYNTHETIC_CONSTANT_SIZE="${SYNTHETIC_CONSTANT_SIZE:-32768}"
 CAPACITY_ALIGNMENT_BYTES="${CAPACITY_ALIGNMENT_BYTES:-0}"
+FIXED_CAPACITY_BYTES="${FIXED_CAPACITY_BYTES:-0}"
 REQUESTS=1000000
 TRACE=""
 DOWNLOAD_WIKI=0
@@ -31,7 +32,7 @@ done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$ROOT/work"
-RESULTS="$ROOT/results"
+RESULTS="${RESULTS_DIR:-$ROOT/results}"
 mkdir -p "$WORK"
 rm -rf "$RESULTS"
 mkdir -p "$RESULTS"
@@ -51,9 +52,7 @@ if [[ $DOWNLOAD_WIKI -eq 1 ]]; then
     echo "[trace] extracting first ${REQUESTS} requests of Wiki2018"
     ARCHIVE="$WORK/wiki2018.tr.tar.gz"
     if [[ ! -s "$ARCHIVE" ]]; then
-      curl -L --fail --retry 3 \
-        -o "$ARCHIVE" \
-        "https://lrb.cs.princeton.edu/wiki2018.tr.tar.gz"
+      curl -L --fail --retry 3 -o "$ARCHIVE" "https://lrb.cs.princeton.edu/wiki2018.tr.tar.gz"
     fi
     MEMBER="$(tar -tzf "$ARCHIVE" | head -n 1)"
     tar -xOzf "$ARCHIVE" "$MEMBER" | head -n "$REQUESTS" > "$TRACE" || true
@@ -78,7 +77,14 @@ git -C "$SRC" clean -fdx
 echo "[patch] applying checked elastic-buffer transformation"
 (cd "$SRC" && python3 "$ROOT/apply_experiment_patch.py")
 
-read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
+if [[ "$FIXED_CAPACITY_BYTES" -gt 0 ]]; then
+  REQUEST_COUNT="$(wc -l < "$TRACE")"
+  echo "[trace] requests=$REQUEST_COUNT fixed_capacity_bytes=$FIXED_CAPACITY_BYTES"
+  CAP_META="$RESULTS/capacities.csv"
+  echo "fraction,capacity_bytes" > "$CAP_META"
+  echo "0,$FIXED_CAPACITY_BYTES" >> "$CAP_META"
+else
+  read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
 import sys
 path = sys.argv[1]
 sizes = {}
@@ -97,13 +103,11 @@ with open(path, "rt", errors="replace") as f:
 print(sum(sizes.values()), n)
 PY
 )"
-
-echo "[trace] requests=$REQUEST_COUNT unique_bytes=$UNIQUE_BYTES"
-
-CAP_META="$RESULTS/capacities.csv"
-echo "fraction,capacity_bytes" > "$CAP_META"
-for F in $CAPACITY_FRACTIONS; do
-  CAP="$(python3 - "$UNIQUE_BYTES" "$F" "$CAPACITY_ALIGNMENT_BYTES" <<'PY'
+  echo "[trace] requests=$REQUEST_COUNT unique_bytes=$UNIQUE_BYTES"
+  CAP_META="$RESULTS/capacities.csv"
+  echo "fraction,capacity_bytes" > "$CAP_META"
+  for F in $CAPACITY_FRACTIONS; do
+    CAP="$(python3 - "$UNIQUE_BYTES" "$F" "$CAPACITY_ALIGNMENT_BYTES" <<'PY'
 import sys
 u = int(sys.argv[1]); f = float(sys.argv[2]); alignment = int(sys.argv[3])
 cap = max(1, int(round(u * f)))
@@ -112,11 +116,11 @@ if alignment > 0:
 print(cap)
 PY
 )"
-  echo "$F,$CAP" >> "$CAP_META"
-done
+    echo "$F,$CAP" >> "$CAP_META"
+  done
+fi
 
 APP_CONF="$SRC/simulator/src/main/resources/application.conf"
-
 echo "[build] compiling patched simulator"
 (cd "$SRC" && ./gradlew simulator:classes </dev/null)
 
@@ -137,25 +141,16 @@ PY
         elastic) ELASTIC=true ;;
         *) echo "Unknown mode: $MODE"; exit 2 ;;
       esac
-
       TAG="f${F}_w${WF}_c${CAP}_${MODE}"
       OUT="$RESULTS/${TAG}.csv"
       LOG="$RESULTS/${TAG}.log"
       echo "[run] capacity_fraction=$F window_fraction=$WF capacity=$CAP mode=$MODE"
-
       cat > "$APP_CONF" <<EOF
 caffeine {
   simulator {
     source = "files"
-    files {
-      paths = ["$TRACE"]
-      format = "adapt-size"
-    }
-    tiny-lfu {
-      count-min {
-        lazy = true
-      }
-    }
+    files { paths = ["$TRACE"] format = "adapt-size" }
+    tiny-lfu { count-min { lazy = true } }
     sized-window-tiny-lfu {
       scaled = false
       bump = true
@@ -169,18 +164,11 @@ caffeine {
     maximum-size = $CAP
     policies = ["sketch.SumSizedWindowTinyLfu"]
     admission = ["Always"]
-    report {
-      format = "csv"
-      output = "$OUT"
-      sort-by = "policy"
-      ascending = true
-    }
+    report { format = "csv" output = "$OUT" sort-by = "policy" ascending = true }
   }
 }
 EOF
-
       (cd "$SRC" && ./gradlew simulator:run -q </dev/null) | tee "$LOG"
-
       printf '{"fraction": %s, "window_fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s", "log": "%s"}\n' \
         "$F" "$WF" "$CAP" "$MODE" "$(basename "$OUT")" "$(basename "$LOG")" > "$RESULTS/${TAG}.json"
     done
