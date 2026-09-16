@@ -1,4 +1,4 @@
-name: Capacity-conditioned AV smoke test
+name: Elastic sized TinyLFU smoke test
 
 on:
   push:
@@ -25,9 +25,9 @@ jobs:
       - name: Install Python analysis dependencies
         run: python3 -m pip install -r requirements.txt
 
-      - name: Run compact synthetic sweep
+      - name: Run compact fixed-versus-elastic sweep
         env:
-          LAMBDAS: "0.50 1.00 2.00"
+          MODES: "fixed elastic"
           CAPACITY_FRACTIONS: "0.01 0.05 0.20"
           REQUESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.requests || '100000' }}
         run: |
@@ -40,5 +40,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: capacity-conditioned-av-smoke-results
+          name: elastic-sized-tinylfu-smoke-results
           path: results/
