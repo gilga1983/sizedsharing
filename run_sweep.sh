@@ -5,6 +5,7 @@ UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/ohadeytan/caffeine.git}"
 UPSTREAM_REF="${UPSTREAM_REF:-arXiv_submission}"
 MODES="${MODES:-fixed elastic}"
 CAPACITY_FRACTIONS="${CAPACITY_FRACTIONS:-0.005 0.01 0.02 0.05 0.10 0.20 0.40}"
+WINDOW_FRACTIONS="${WINDOW_FRACTIONS:-0.01}"
 REQUESTS=1000000
 TRACE=""
 DOWNLOAD_WIKI=0
@@ -45,7 +46,7 @@ if [[ $DOWNLOAD_WIKI -eq 1 ]]; then
     if [[ ! -s "$ARCHIVE" ]]; then
       curl -L --fail --retry 3 \
         -o "$ARCHIVE" \
-        "http://lrb.cs.princeton.edu/wiki2018.tr.tar.gz"
+        "https://lrb.cs.princeton.edu/wiki2018.tr.tar.gz"
     fi
     MEMBER="$(tar -tzf "$ARCHIVE" | head -n 1)"
     tar -xOzf "$ARCHIVE" "$MEMBER" | head -n "$REQUESTS" > "$TRACE" || true
@@ -113,19 +114,28 @@ echo "[build] compiling patched simulator"
 
 while IFS=, read -r F CAP; do
   [[ "$F" == "fraction" ]] && continue
-  for MODE in $MODES; do
-    case "$MODE" in
-      fixed) ELASTIC=false ;;
-      elastic) ELASTIC=true ;;
-      *) echo "Unknown mode: $MODE"; exit 2 ;;
-    esac
+  for WF in $WINDOW_FRACTIONS; do
+    PM="$(python3 - "$WF" <<'PY'
+import sys
+w = float(sys.argv[1])
+if not (0.0 < w < 1.0):
+    raise SystemExit("Window fraction must be in (0,1)")
+print(f"{1.0 - w:.12g}")
+PY
+)"
+    for MODE in $MODES; do
+      case "$MODE" in
+        fixed) ELASTIC=false ;;
+        elastic) ELASTIC=true ;;
+        *) echo "Unknown mode: $MODE"; exit 2 ;;
+      esac
 
-    TAG="f${F}_c${CAP}_${MODE}"
-    OUT="$RESULTS/${TAG}.csv"
-    LOG="$RESULTS/${TAG}.log"
-    echo "[run] fraction=$F capacity=$CAP mode=$MODE"
+      TAG="f${F}_w${WF}_c${CAP}_${MODE}"
+      OUT="$RESULTS/${TAG}.csv"
+      LOG="$RESULTS/${TAG}.log"
+      echo "[run] capacity_fraction=$F window_fraction=$WF capacity=$CAP mode=$MODE"
 
-    cat > "$APP_CONF" <<EOF
+      cat > "$APP_CONF" <<EOF
 caffeine {
   simulator {
     source = "files"
@@ -145,7 +155,7 @@ caffeine {
       elastic-buffer = $ELASTIC
     }
     window-tiny-lfu {
-      percent-main = [0.99]
+      percent-main = [$PM]
       percent-main-protected = 0.80
     }
     maximum-size = $CAP
@@ -161,10 +171,11 @@ caffeine {
 }
 EOF
 
-    (cd "$SRC" && ./gradlew simulator:run -q </dev/null) | tee "$LOG"
+      (cd "$SRC" && ./gradlew simulator:run -q </dev/null) | tee "$LOG"
 
-    printf '{"fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s", "log": "%s"}\n' \
-      "$F" "$CAP" "$MODE" "$(basename "$OUT")" "$(basename "$LOG")" > "$RESULTS/${TAG}.json"
+      printf '{"fraction": %s, "window_fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s", "log": "%s"}\n' \
+        "$F" "$WF" "$CAP" "$MODE" "$(basename "$OUT")" "$(basename "$LOG")" > "$RESULTS/${TAG}.json"
+    done
   done
 done < "$CAP_META"
 
