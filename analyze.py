@@ -31,7 +31,7 @@ def read_occupancy_stats(path: Path):
     return stats
 
 
-for sidecar in sorted(results.glob("f*_c*_*.json")):
+for sidecar in sorted(results.glob("f*_w*_c*_*.json")):
     meta = json.loads(sidecar.read_text())
     csv_path = results / meta["csv"]
     if not csv_path.exists():
@@ -44,6 +44,7 @@ for sidecar in sorted(results.glob("f*_c*_*.json")):
     occupancy = read_occupancy_stats(results / meta.get("log", ""))
     rows.append({
         "capacity_fraction": float(meta["fraction"]),
+        "window_fraction": float(meta["window_fraction"]),
         "capacity_bytes": int(meta["capacity_bytes"]),
         "mode": meta["mode"],
         "policy": r.get("Policy", ""),
@@ -69,7 +70,7 @@ for sidecar in sorted(results.glob("f*_c*_*.json")):
 if not rows:
     raise SystemExit(f"No completed runs found under {results}")
 
-df = pd.DataFrame(rows).sort_values(["capacity_bytes", "mode"])
+df = pd.DataFrame(rows).sort_values(["capacity_bytes", "window_fraction", "mode"])
 df.to_csv(results / "all_results.csv", index=False)
 
 metrics = [
@@ -78,12 +79,12 @@ metrics = [
     "avg_slack_bytes", "window_borrow_fraction", "main_borrow_fraction",
     "max_window_borrow_bytes", "max_main_borrow_bytes",
 ]
-
-fixed = df[df["mode"] == "fixed"][["capacity_fraction", "capacity_bytes"] + metrics].copy()
+keys = ["capacity_fraction", "window_fraction", "capacity_bytes"]
+fixed = df[df["mode"] == "fixed"][keys + metrics].copy()
 fixed = fixed.rename(columns={m: f"fixed_{m}" for m in metrics})
-elastic = df[df["mode"] == "elastic"][["capacity_fraction", "capacity_bytes"] + metrics].copy()
+elastic = df[df["mode"] == "elastic"][keys + metrics].copy()
 elastic = elastic.rename(columns={m: f"elastic_{m}" for m in metrics})
-comparison = fixed.merge(elastic, on=["capacity_fraction", "capacity_bytes"], how="inner")
+comparison = fixed.merge(elastic, on=keys, how="inner")
 comparison["hit_gain_pp"] = comparison["elastic_hit_rate"] - comparison["fixed_hit_rate"]
 comparison["weighted_hit_gain_pp"] = (
     comparison["elastic_weighted_hit_rate"] - comparison["fixed_weighted_hit_rate"]
@@ -96,9 +97,9 @@ comparison["slack_reduction_bytes"] = (
 )
 comparison.to_csv(results / "elastic_vs_fixed.csv", index=False)
 
-print("\nElastic buffer versus fixed 1%/99% partition:")
+print("\nElastic buffer versus fixed partition:")
 print(comparison[[
-    "capacity_fraction", "capacity_bytes",
+    "capacity_fraction", "window_fraction", "capacity_bytes",
     "fixed_hit_rate", "elastic_hit_rate", "hit_gain_pp",
     "fixed_weighted_hit_rate", "elastic_weighted_hit_rate", "weighted_hit_gain_pp",
     "fixed_avg_utilization", "elastic_avg_utilization", "utilization_gain_pp",
@@ -106,34 +107,41 @@ print(comparison[[
     "elastic_window_borrow_fraction", "elastic_main_borrow_fraction",
 ]].to_string(index=False))
 
-fig, ax = plt.subplots()
-ax.plot(comparison["capacity_fraction"] * 100, comparison["hit_gain_pp"], marker="o")
-ax.axhline(0.0, linestyle="--")
-ax.set_xlabel("Cache capacity (% of unique-byte footprint)")
-ax.set_ylabel("Elastic gain in object hit rate (percentage points)")
-ax.set_title("Sized W-TinyLFU: elastic vs fixed partition")
-fig.tight_layout()
-fig.savefig(results / "elastic_object_hit_gain.png", dpi=180)
-plt.close(fig)
 
-fig, ax = plt.subplots()
-ax.plot(comparison["capacity_fraction"] * 100, comparison["weighted_hit_gain_pp"], marker="o")
-ax.axhline(0.0, linestyle="--")
-ax.set_xlabel("Cache capacity (% of unique-byte footprint)")
-ax.set_ylabel("Elastic gain in weighted hit rate (percentage points)")
-ax.set_title("Sized W-TinyLFU: byte-hit impact of elastic sharing")
-fig.tight_layout()
-fig.savefig(results / "elastic_weighted_hit_gain.png", dpi=180)
-plt.close(fig)
+def plot_vs_window(column, ylabel, filename, title):
+    fig, ax = plt.subplots()
+    for cap_fraction, group in comparison.groupby("capacity_fraction"):
+        group = group.sort_values("window_fraction")
+        ax.plot(group["window_fraction"] * 100, group[column], marker="o",
+                label=f"cache={100 * cap_fraction:g}% footprint")
+    ax.axhline(0.0, linestyle="--")
+    ax.set_xlabel("Nominal Window (% of cache)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if comparison["capacity_fraction"].nunique() > 1:
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(results / filename, dpi=180)
+    plt.close(fig)
 
-fig, ax = plt.subplots()
-ax.plot(comparison["capacity_fraction"] * 100, comparison["utilization_gain_pp"], marker="o")
-ax.axhline(0.0, linestyle="--")
-ax.set_xlabel("Cache capacity (% of unique-byte footprint)")
-ax.set_ylabel("Gain in average byte utilization (percentage points)")
-ax.set_title("Elastic sharing: recovered stranded capacity")
-fig.tight_layout()
-fig.savefig(results / "elastic_utilization_gain.png", dpi=180)
-plt.close(fig)
+
+plot_vs_window(
+    "hit_gain_pp",
+    "Elastic gain in object hit rate (percentage points)",
+    "elastic_object_hit_gain_vs_window.png",
+    "Sized W-TinyLFU: elastic gain vs Window fraction",
+)
+plot_vs_window(
+    "weighted_hit_gain_pp",
+    "Elastic gain in weighted hit rate (percentage points)",
+    "elastic_weighted_hit_gain_vs_window.png",
+    "Sized W-TinyLFU: byte-hit gain vs Window fraction",
+)
+plot_vs_window(
+    "utilization_gain_pp",
+    "Gain in average byte utilization (percentage points)",
+    "elastic_utilization_gain_vs_window.png",
+    "Elastic sharing: recovered stranded capacity vs Window fraction",
+)
 
 print(f"\nWrote results and plots to: {results.resolve()}")
