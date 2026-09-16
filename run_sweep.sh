@@ -141,16 +141,25 @@ PY
         elastic) ELASTIC=true ;;
         *) echo "Unknown mode: $MODE"; exit 2 ;;
       esac
+
       TAG="f${F}_w${WF}_c${CAP}_${MODE}"
       OUT="$RESULTS/${TAG}.csv"
       LOG="$RESULTS/${TAG}.log"
       echo "[run] capacity_fraction=$F window_fraction=$WF capacity=$CAP mode=$MODE"
+
       cat > "$APP_CONF" <<EOF
 caffeine {
   simulator {
     source = "files"
-    files { paths = ["$TRACE"] format = "adapt-size" }
-    tiny-lfu { count-min { lazy = true } }
+    files {
+      paths = ["$TRACE"]
+      format = "adapt-size"
+    }
+    tiny-lfu {
+      count-min {
+        lazy = true
+      }
+    }
     sized-window-tiny-lfu {
       scaled = false
       bump = true
@@ -164,10 +173,16 @@ caffeine {
     maximum-size = $CAP
     policies = ["sketch.SumSizedWindowTinyLfu"]
     admission = ["Always"]
-    report { format = "csv" output = "$OUT" sort-by = "policy" ascending = true }
+    report {
+      format = "csv"
+      output = "$OUT"
+      sort-by = "policy"
+      ascending = true
+    }
   }
 }
 EOF
+
       (cd "$SRC" && ./gradlew simulator:run -q </dev/null) | tee "$LOG"
       printf '{"fraction": %s, "window_fraction": %s, "capacity_bytes": %s, "mode": "%s", "csv": "%s", "log": "%s"}\n' \
         "$F" "$WF" "$CAP" "$MODE" "$(basename "$OUT")" "$(basename "$LOG")" > "$RESULTS/${TAG}.json"
