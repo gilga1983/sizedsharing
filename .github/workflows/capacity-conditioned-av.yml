@@ -25,11 +25,16 @@ jobs:
       - name: Install Python analysis dependencies
         run: python3 -m pip install -r requirements.txt
 
-      - name: Run Window-fraction stress sweep
+      - name: Run constant-size packing null test
         env:
           MODES: "fixed elastic"
           CAPACITY_FRACTIONS: "0.05"
           WINDOW_FRACTIONS: "0.01 0.05 0.10 0.20 0.40"
+          SYNTHETIC_SIZE_MODE: "constant"
+          SYNTHETIC_CONSTANT_SIZE: "32768"
+          # Align total cache to 100 whole objects so every Window fraction above
+          # is also an exact whole-object boundary. This removes packing friction.
+          CAPACITY_ALIGNMENT_BYTES: "3276800"
           REQUESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.requests || '100000' }}
         run: |
           chmod +x run_sweep.sh
@@ -41,5 +46,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: elastic-sized-tinylfu-smoke-results
+          name: elastic-sized-tinylfu-constant-size-null
           path: results/
