@@ -20,16 +20,19 @@ bytes(Window) <= Window entitlement
 
 Variable-size objects can therefore leave unused bytes below the Window entitlement. In the historical fixed policy those bytes are stranded because Main is capped independently. In the elastic policy Main may use them.
 
-The elastic semantics are:
+The elastic semantics are deliberately split into **logical admission** and **physical placement**:
 
 - Window turnover is identical to historical sized W-TinyLFU.
 - Window never remains above its nominal entitlement after request processing.
-- Candidates evicted from Window try Main against the single global physical limit `M`.
-- If Window's variable-size packing left enough global slack for a candidate, Main can place it without evicting a resident object.
-- If more bytes are needed, Aggregated Victims compares the candidate against only enough Main victims to free the physically required bytes.
+- Object-size eligibility is unchanged from the historical policy.
+- A Window candidate is tested against the nominal Main reservation exactly as before. Borrowable Window slack never lets a candidate bypass TinyLFU / Aggregated Victims admission.
+- Aggregated Victims constructs the same logical victim set implied by overflow beyond nominal Main and applies the historical `lambda = 1` comparison.
+- Only after a candidate wins admission does elastic sharing matter physically.
+- If Window packing slack gives enough global space, the winning candidate may enter Main while some logically defeated victims remain resident.
+- If physical bytes are still required, only enough of those victims are actually evicted to satisfy the global limit `M`.
 - If Window later needs bytes that Main is using, Main yields enough bytes to preserve the global limit `M`.
 
-This is intentionally a packing-friction mechanism, not adaptive Window sizing.
+This is intentionally a packing-friction mechanism, not adaptive Window sizing and not a relaxation of admission control.
 
 ## Experiment
 
@@ -37,7 +40,7 @@ Compare exactly two policies:
 
 ```text
 fixed   = historical hard Window/Main byte partition
-elastic = same Window policy and nominal split, but Window packing slack is usable by Main
+elastic = same Window policy and admission rule, but Window packing slack is usable by Main
 ```
 
 Everything else is held constant:
@@ -57,7 +60,7 @@ CAPACITY_FRACTIONS="0.05" \
 ./run_sweep.sh --synthetic --requests 200000
 ```
 
-This isolates one question: **does eliminating stranded Window packing capacity improve byte utilization and cache performance for variable-sized objects?**
+This isolates one question: **does eliminating stranded Window packing capacity improve byte utilization and cache performance for variable-sized objects when admission control is held fixed?**
 
 ## Constant-size null test
 
