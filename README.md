@@ -4,7 +4,7 @@ Minimal experiments on **elastic byte sharing inside variable-sized W-TinyLFU**.
 
 The current experiment is cache-only. There is no prefetcher, predictor, residual stream, mapper, controller, or parameter retuning.
 
-We start from the historical sized W-TinyLFU / Aggregated Victims implementation in `ohadeytan/caffeine:arXiv_submission` and keep its admission rule unchanged (`lambda = 1`). The only change is that the Window and Main regions may temporarily borrow each other's unused bytes.
+We start from the historical sized W-TinyLFU / Aggregated Victims implementation in `ohadeytan/caffeine:arXiv_submission` and keep its admission rule unchanged (`lambda = 1`). The only change is how unused bytes are shared between the Window and Main regions.
 
 The total cache capacity `M` is the only hard byte limit:
 
@@ -12,13 +12,16 @@ The total cache capacity `M` is the only hard byte limit:
 bytes(Window) + bytes(Main) <= M
 ```
 
-The familiar 1% Window / 99% Main split remains the nominal reservation. In the historical fixed policy, those are hard internal capacity boundaries. In the elastic variant they are soft reservations:
+The familiar 1% Window / 99% Main split is an **entitlement**, not a pair of rigid byte walls. Variable-size objects can leave packing slack on either side, and the other side may temporarily use those otherwise-stranded bytes.
 
-- Window may exceed 1% while Main leaves bytes unused.
-- Main may exceed 99% while Window leaves bytes unused.
-- Space is reclaimed only when the total cache exceeds `M`.
+Borrowed capacity has weak ownership:
 
-When the cache is overfull, the side currently borrowing capacity gives bytes back. Window overflow follows the existing sized W-TinyLFU / AV candidate path; Main overflow evicts from Main until the global byte limit is restored.
+- Main may use bytes that the Window cannot currently fill.
+- Window may keep one variable-size overshoot while Main has globally free bytes.
+- If another miss arrives while Window is already borrowing, Window first returns to its nominal entitlement by pushing old Window entries through the usual candidate path.
+- If Window needs bytes currently borrowed by Main, Main yields enough bytes to preserve the single hard global limit `M`.
+
+This is intentionally a packing-friction mechanism, not adaptive Window sizing. The Window is not allowed to grow persistently into unused Main capacity.
 
 ## First experiment
 
@@ -26,7 +29,7 @@ Compare exactly two policies:
 
 ```text
 fixed   = historical 1% Window / 99% Main hard partition
-elastic = same policy and same nominal split, but unused bytes are shareable
+elastic = same policy and same nominal split, but packing slack is shareable
 ```
 
 Everything else is held constant:
@@ -39,7 +42,19 @@ Everything else is held constant:
 - same trace;
 - same 1% / 99% nominal split.
 
-This isolates one question: **does eliminating stranded capacity between Window and Main improve a variable-sized cache?**
+This isolates one question: **does eliminating stranded capacity between Window and Main improve byte utilization and cache performance for variable-sized objects?**
+
+## Measurements
+
+In addition to object hit rate and weighted/byte hit rate, the harness records occupancy-only instrumentation:
+
+- average total byte utilization;
+- average slack bytes;
+- average Window and Main occupancy;
+- fraction of requests where Window or Main is borrowing;
+- maximum borrowed bytes on either side.
+
+These counters do not affect policy decisions.
 
 ## Harness
 
@@ -76,11 +91,12 @@ of the trace's unique-byte footprint.
 
 ## Outputs
 
-The analysis reports both object hit rate and weighted/byte hit rate and produces:
+The analysis produces:
 
 - `results/all_results.csv`
 - `results/elastic_vs_fixed.csv`
 - `results/elastic_object_hit_gain.png`
 - `results/elastic_weighted_hit_gain.png`
+- `results/elastic_utilization_gain.png`
 
 Synthetic CI results validate plumbing only. Research conclusions should use real sized-object traces.
