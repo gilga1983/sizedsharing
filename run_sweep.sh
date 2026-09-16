@@ -28,7 +28,9 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$ROOT/work"
 RESULTS="$ROOT/results"
-mkdir -p "$WORK" "$RESULTS"
+mkdir -p "$WORK"
+rm -rf "$RESULTS"
+mkdir -p "$RESULTS"
 
 if [[ $SYNTHETIC -eq 1 ]]; then
   TRACE="$WORK/synthetic_${REQUESTS}.tr"
@@ -105,7 +107,7 @@ done
 APP_CONF="$SRC/simulator/src/main/resources/application.conf"
 
 echo "[build] compiling patched simulator"
-(cd "$SRC" && ./gradlew simulator:classes)
+(cd "$SRC" && ./gradlew simulator:classes </dev/null)
 
 while IFS=, read -r F CAP; do
   [[ "$F" == "fraction" ]] && continue
@@ -150,7 +152,7 @@ caffeine {
 }
 EOF
 
-    (cd "$SRC" && ./gradlew simulator:run -q)
+    (cd "$SRC" && ./gradlew simulator:run -q </dev/null)
 
     printf '{"fraction": %s, "capacity_bytes": %s, "lambda": %s, "csv": "%s"}\n' \
       "$F" "$CAP" "$L" "$(basename "$OUT")" > "$RESULTS/${TAG}.json"
