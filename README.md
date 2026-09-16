@@ -1,64 +1,51 @@
 # SizedSharing
 
-Experiments on an **Elastic Buffer** that shares a fixed byte budget between a reactive cache and a predictive/prefetch buffer.
+Minimal experiments on **elastic byte sharing inside variable-sized W-TinyLFU**.
 
-There is no separate mapper abstraction. The Elastic Buffer owns the total fast-tier budget `M` and moves the byte boundary between:
+The current experiment is cache-only. There is no prefetcher, predictor, residual stream, mapper, controller, or parameter retuning.
 
-```text
-M = C + P
-```
+We start from the historical sized W-TinyLFU / Aggregated Victims implementation in `ohadeytan/caffeine:arXiv_submission` and keep its admission rule unchanged (`lambda = 1`). The only change is that the Window and Main regions may temporarily borrow each other's unused bytes.
 
-where `C` is the reactive cache capacity and `P` is the prefetch-buffer capacity. The two regions are disjoint. A prefetched object occupies only `P`; when it is requested, it leaves the prefetch buffer and is admitted to the reactive cache according to the cache policy.
-
-The central hypothesis is stronger than ordinary resizing: **when the Elastic Buffer changes a subsystem's byte budget, that subsystem should be re-optimized for its new size instead of merely shrinking or expanding its previous state.**
-
-For the cache side, a candidate capacity `C` is evaluated after retuning its size-aware admission behavior. For Aggregated Victims (AV), the historical admission rule is approximately
+The total cache capacity `M` is the only hard byte limit:
 
 ```text
-freq(candidate) >= sum(freq(victim_i))
+bytes(Window) + bytes(Main) <= M
 ```
 
-We introduce an exchange-rate parameter `lambda`:
+The familiar 1% Window / 99% Main split remains the nominal reservation. In the historical fixed policy, those are hard internal capacity boundaries. In the elastic variant they are soft reservations:
+
+- Window may exceed 1% while Main leaves bytes unused.
+- Main may exceed 99% while Window leaves bytes unused.
+- Space is reclaimed only when the total cache exceeds `M`.
+
+When the cache is overfull, the side currently borrowing capacity gives bytes back. Window overflow follows the existing sized W-TinyLFU / AV candidate path; Main overflow evicts from Main until the global byte limit is restored.
+
+## First experiment
+
+Compare exactly two policies:
 
 ```text
-freq(candidate) >= lambda * sum(freq(victim_i))
+fixed   = historical 1% Window / 99% Main hard partition
+elastic = same policy and same nominal split, but unused bytes are shareable
 ```
 
-`lambda = 1.0` is the original AV rule. The current experiment measures the cache-side utility envelope by sweeping capacity and `lambda`. If the best `lambda` changes with `C`, that is evidence that the Elastic Buffer should retune cache admission whenever it moves the boundary.
+Everything else is held constant:
 
-Later, the predictive side will expose an analogous budget-conditioned control, e.g. a prediction/admission threshold `tau(P)`. For a candidate split, predictor utility must be measured on the residual misses produced by the corresponding candidate cache size.
+- same total cache bytes;
+- same sized W-TinyLFU code;
+- same Aggregated Victims admission rule;
+- `lambda = 1`;
+- same TinyLFU sketch;
+- same trace;
+- same 1% / 99% nominal split.
 
-Conceptually, the Elastic Buffer will evaluate
+This isolates one question: **does eliminating stranded capacity between Window and Main improve a variable-sized cache?**
 
-```text
-cache_utility(C) = max over cache knobs of U_cache(C)
-prefetch_utility(P | C) = max over predictor knobs of U_prefetch(P | residual(C))
-choose C + P = M to maximize total utility
-```
+## Harness
 
-## Phase 1: cache-side capacity conditioning
+The harness checks out the exact historical branch and applies a checked source transformation. It also removes two obsolete build-time dependencies that are unrelated to the simulator policy: the old bnd packaging plugin and the unavailable Collision product-cache dependency.
 
-We hold the W-TinyLFU window at 1% and sweep:
-
-```text
-lambda = 0.25 0.50 0.75 1.00 1.25 1.50 2.00 3.00 4.00
-```
-
-Cache capacities default to:
-
-```text
-0.5% 1% 2% 5% 10% 20% 40%
-```
-
-of the unique-byte footprint of the trace prefix.
-
-The harness checks out the exact historical `ohadeytan/caffeine:arXiv_submission` implementation and applies a checked source transformation. Every expected historical code fragment must match exactly before the experiment edits it.
-
-## Quick CI smoke test
-
-The GitHub Actions workflow runs a compact deterministic synthetic sized-object trace on every push. This validates the historical checkout, transformation, build, sweep, CSV parsing, and plotting. Synthetic results are for plumbing only, not for research claims.
-
-Locally:
+Run a synthetic smoke test:
 
 ```bash
 chmod +x run_sweep.sh
@@ -66,9 +53,7 @@ chmod +x run_sweep.sh
 python3 analyze.py results
 ```
 
-## Real traces
-
-For an existing AdaptSize-format trace:
+Run an AdaptSize-format trace:
 
 ```bash
 ./run_sweep.sh --trace /path/to/trace.tr
@@ -81,26 +66,21 @@ Trace format:
 time object_id size_bytes [optional fields...]
 ```
 
-The intended research progression is Wiki2018 and the sized-cache traces, followed by IBM005/IBM058 from the Prefix Caching evaluation.
+The default capacity sweep is:
+
+```text
+0.5% 1% 2% 5% 10% 20% 40%
+```
+
+of the trace's unique-byte footprint.
 
 ## Outputs
 
-The analysis produces:
+The analysis reports both object hit rate and weighted/byte hit rate and produces:
 
 - `results/all_results.csv`
-- `results/best_by_capacity.csv`
-- `results/best_lambda_vs_capacity.png`
-- `results/object_hit_heatmap.png`
-- `results/gain_over_original.png`
+- `results/elastic_vs_fixed.csv`
+- `results/elastic_object_hit_gain.png`
+- `results/elastic_weighted_hit_gain.png`
 
-Both object hit rate and weighted/byte hit rate are retained.
-
-## Identity check
-
-Before interpreting real results, compare a patched `lambda=1` run against an unmodified historical AV run at the same trace and capacity. Hits, misses, admissions, and evictions should match exactly.
-
-## Interpretation
-
-A useful cache-side signal is not one isolated best point. We want the best `lambda` to differ from 1 across multiple adjacent capacities, produce a material gain over historical AV, and replicate across real traces.
-
-The next stage is the actual Elastic Buffer experiment: sweep the split `(C, P)`, re-optimize cache admission for each `C`, re-optimize predictor admission for each `P`, and evaluate the predictor on the residual stream generated by that same cache candidate. The final online controller should approximate this counterfactual optimum without replaying the full trace.
+Synthetic CI results validate plumbing only. Research conclusions should use real sized-object traces.
