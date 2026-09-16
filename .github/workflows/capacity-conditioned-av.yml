@@ -1,0 +1,37 @@
+name: Capacity-conditioned AV
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: "Wiki2018 prefix requests"
+        required: true
+        default: "1000000"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+
+      - name: Install Python analysis dependencies
+        run: python3 -m pip install pandas matplotlib
+
+      - name: Run sweep
+        run: |
+          chmod +x run_sweep.sh
+          ./run_sweep.sh --download-wiki --requests "${{ inputs.requests }}"
+
+      - name: Analyze
+        run: python3 analyze.py results
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capacity-conditioned-av-results
+          path: results/
