@@ -20,19 +20,12 @@ simulator_build = src / "simulator/build.gradle"
 registry = src / "simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/Registry.java"
 collision_policy = src / "simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/product/CollisionPolicy.java"
 
-# The historical bnd plugin is packaging/OSGi machinery. Its 2019-era plugin
-# dependency no longer resolves cleanly on current runners and is not needed to
-# compile or execute the simulator. Guard the exact line so an upstream change
-# cannot silently alter what this experiment builds.
+# Simulator-only compatibility fixes for the historical branch.
 replace_once(
     build,
     "  apply plugin: 'biz.aQute.bnd.builder'\n",
     "  // SizedSharing simulator-only build: obsolete bnd packaging plugin disabled.\n",
 )
-
-# Collision is an unrelated product policy whose historical dependency was
-# hosted on the now-retired Bintray/JCenter infrastructure. Remove only its
-# compile-time hooks so the AV simulator can build without changing cache logic.
 replace_once(
     simulator_build,
     "  implementation libraries.collision\n",
@@ -53,46 +46,71 @@ if "systems.comodal.collision.cache.CollisionBuilder" not in collision_text:
     raise RuntimeError("Historical CollisionPolicy.java did not match expected dependency")
 collision_policy.unlink()
 
+# Add a switch for the minimal elastic-buffer experiment. The historical
+# 1%/99% split remains the nominal ownership, but in elastic mode only the
+# global cache byte limit is hard. Window and Main may borrow unused bytes
+# from one another.
 replace_once(
     sized,
-    '''    public boolean prune() {\n      return config().getBoolean("sized-window-tiny-lfu.prune");\n    }\n''',
-    '''    public boolean prune() {\n      return config().getBoolean("sized-window-tiny-lfu.prune");\n    }\n    public double admissionMultiplier() {\n      return config().getDouble("sized-window-tiny-lfu.admission-multiplier");\n    }\n''',
+    '''  protected final boolean bump;\n  protected final boolean prune;  \n''',
+    '''  protected final boolean bump;\n  protected final boolean prune;\n  protected final boolean elasticBuffer;  \n''',
+)
+
+replace_once(
+    sized,
+    '''    this.bump = settings.bump();\n    this.prune = settings.prune();\n    this.maxMain = (long) (settings.maximumSizeLong() * percentMain);\n''',
+    '''    this.bump = settings.bump();\n    this.prune = settings.prune();\n    this.elasticBuffer = settings.elasticBuffer();\n    this.maxMain = (long) (settings.maximumSizeLong() * percentMain);\n''',
+)
+
+replace_once(
+    sized,
+    '''    if (weight > (maxMain)) {\n      policyStats.recordRejection();\n      return;\n    }\n''',
+    '''    if (weight > (elasticBuffer ? maximumSize : maxMain)) {\n      policyStats.recordRejection();\n      return;\n    }\n''',
+)
+
+replace_once(
+    sized,
+    '''      if ((sizeData + candidate.weight - sizeWindow) > maxMain) {\n        coreEviction(candidate);\n      } else {\n        admit(candidate);\n      }\n    }\n  }\n''',
+    '''      if (candidateExceedsCapacity(candidate)) {\n        coreEviction(candidate);\n      } else {\n        admit(candidate);\n      }\n    }\n\n    // If Window is at or below its nominal reservation, any remaining\n    // overflow belongs to Main borrowing Window's unused bytes. Reclaim only\n    // enough Main bytes to satisfy the single hard global limit.\n    if (elasticBuffer) {\n      while (sizeData > maximumSize) {\n        checkState((sizeData - sizeWindow) > 0);\n        victimsCount++;\n        evictNode(getVictim());\n      }\n    }\n  }\n''',
+)
+
+replace_once(
+    sized,
+    '''  protected void coreEviction(Node candidate) {\n    Node victim = getVictim();\n    victimsCount++;\n    if (compare(sketch.frequency(candidate.key), candidate.weight, sketch.frequency(victim.key), victim.weight)) {\n      victimsCount--;\n      while ((sizeData + candidate.weight - sizeWindow) > maxMain) {\n        Node evict = getVictim();\n        victimsCount++;\n        evictNode(evict);\n      }\n      admit(candidate);\n    } else {\n''',
+    '''  protected void coreEviction(Node candidate) {\n    long bytesNeeded = bytesNeededForCandidate(candidate);\n    if (elasticBuffer && bytesNeeded > (sizeData - sizeWindow)) {\n      reject(candidate);\n      return;\n    }\n    Node victim = getVictim();\n    victimsCount++;\n    if (compare(sketch.frequency(candidate.key), candidate.weight, sketch.frequency(victim.key), victim.weight)) {\n      victimsCount--;\n      while (candidateExceedsCapacity(candidate)) {\n        Node evict = getVictim();\n        victimsCount++;\n        evictNode(evict);\n      }\n      admit(candidate);\n    } else {\n''',
+)
+
+replace_once(
+    sized,
+    '''  private void collectCandidates(final Node headCandidates) {\n    while (sizeWindow > maxWindow) {\n      Node candidate = headWindow.next;\n      candidate.status = Status.PROBATION;\n      sizeWindow -= candidate.weight;\n      sizeData -= candidate.weight;\n      candidate.remove();\n      candidate.appendToTail(headCandidates);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
+    '''  private void collectCandidates(final Node headCandidates) {\n    if (elasticBuffer) {\n      // Window may exceed its nominal reservation while Main leaves bytes\n      // unused. It gives bytes back only when the global cache is overfull.\n      while ((sizeData > maximumSize) && (sizeWindow > maxWindow)) {\n        Node candidate = headWindow.next;\n        candidate.status = Status.PROBATION;\n        sizeWindow -= candidate.weight;\n        sizeData -= candidate.weight;\n        candidate.remove();\n        candidate.appendToTail(headCandidates);\n      }\n    } else {\n      while (sizeWindow > maxWindow) {\n        Node candidate = headWindow.next;\n        candidate.status = Status.PROBATION;\n        sizeWindow -= candidate.weight;\n        sizeData -= candidate.weight;\n        candidate.remove();\n        candidate.appendToTail(headCandidates);\n      }\n    }\n  }\n\n  /** True if admitting this detached Window candidate would exceed its capacity. */\n  protected boolean candidateExceedsCapacity(Node candidate) {\n    if (elasticBuffer) {\n      return (sizeData + candidate.weight) > maximumSize;\n    }\n    return (sizeData + candidate.weight - sizeWindow) > maxMain;\n  }\n\n  /** Bytes that must be reclaimed before this detached candidate can be admitted. */\n  protected long bytesNeededForCandidate(Node candidate) {\n    if (elasticBuffer) {\n      return Math.max(0L, (sizeData + candidate.weight) - maximumSize);\n    }\n    return Math.max(0L, (sizeData + candidate.weight - sizeWindow) - maxMain);\n  }\n  \n  protected Node getVictim() {\n''',
+)
+
+replace_once(
+    sized,
+    '''    public boolean prune() {\n      return config().getBoolean("sized-window-tiny-lfu.prune");\n    }\n  }\n}\n''',
+    '''    public boolean prune() {\n      return config().getBoolean("sized-window-tiny-lfu.prune");\n    }\n    public boolean elasticBuffer() {\n      return config().getBoolean("sized-window-tiny-lfu.elastic-buffer");\n    }\n  }\n}\n''',
+)
+
+# AV still uses the historical lambda=1 candidate-vs-aggregate-victims rule.
+# Only its byte-reclamation target changes from the hard Main partition to the
+# global limit when elastic mode is enabled.
+replace_once(
+    sum_sized,
+    '''    String name = String.format("sketch.sized." + (scaled ? "Scaled" : "") \n        + "SumWindowTinyLfu (%.0f%%)", 100 * (1.0d - percentMain));\n''',
+    '''    String name = String.format("sketch.sized." + (scaled ? "Scaled" : "")\n        + (elasticBuffer ? "Elastic" : "")\n        + "SumWindowTinyLfu (%.0f%%)", 100 * (1.0d - percentMain));\n''',
 )
 
 replace_once(
     sum_sized,
-    '''public final class SumSizedWindowTinyLfuPolicy extends SizedWindowTinyLfuPolicy {\n\n''',
-    '''public final class SumSizedWindowTinyLfuPolicy extends SizedWindowTinyLfuPolicy {\n  private final double admissionMultiplier;\n\n''',
-)
-
-replace_once(
-    sum_sized,
-    '''    super(percentMain, settings);\n    String name = String.format("sketch.sized." + (scaled ? "Scaled" : "") \n        + "SumWindowTinyLfu (%.0f%%)", 100 * (1.0d - percentMain));\n''',
-    '''    super(percentMain, settings);\n    this.admissionMultiplier = settings.admissionMultiplier();\n    String name = String.format("sketch.sized." + (scaled ? "Scaled" : "") \n        + "SumWindowTinyLfu (%.0f%%, lambda=%.2f)",\n        100 * (1.0d - percentMain), admissionMultiplier);\n''',
-)
-
-replace_once(
-    sum_sized,
-    '''      if (prune && victimsFreq > candidateFreq) {\n        break;\n      }\n''',
-    '''      if (prune && candidateFreq < (admissionMultiplier * victimsFreq)) {\n        break;\n      }\n''',
-)
-
-replace_once(
-    sum_sized,
-    '''    if (!compare(candidateFreq, candidate.weight, victimsFreq, victimsSize)) {\n''',
-    '''    if (!compareAggregate(candidateFreq, candidate.weight, victimsFreq, victimsSize)) {\n''',
-)
-
-replace_once(
-    sum_sized,
-    '''      admit(candidate);\n    }    \n  }\n}\n''',
-    '''      admit(candidate);\n    }    \n  }\n\n  /** Applies a tunable exchange rate to the aggregate victim score. */\n  private boolean compareAggregate(int candidateFreq, int candidateWeight,\n      int victimsFreq, int victimsWeight) {\n    if (admissionMultiplier == 1.0d) {\n      return compare(candidateFreq, candidateWeight, victimsFreq, victimsWeight);\n    }\n    if (scaled) {\n      return ((double) candidateFreq * victimsWeight)\n          > (admissionMultiplier * victimsFreq * candidateWeight);\n    }\n    return candidateFreq >= (admissionMultiplier * victimsFreq);\n  }\n}\n''',
+    '''    long sizeNeeded = (sizeData + candidate.weight - sizeWindow) - maxMain;\n    int victimsSize = 0;\n''',
+    '''    long sizeNeeded = bytesNeededForCandidate(candidate);\n    if (elasticBuffer && sizeNeeded > (sizeData - sizeWindow)) {\n      reject(candidate);\n      return;\n    }\n    int victimsSize = 0;\n''',
 )
 
 replace_once(
     reference,
     '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n  }\n''',
-    '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n    admission-multiplier = 1.0\n  }\n''',
+    '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n    elastic-buffer = false\n  }\n''',
 )
 
-print("Applied simulator-only compatibility fixes and capacity-conditioned AV source transformation successfully.")
+print("Applied simulator compatibility fixes and minimal elastic Window/Main sharing successfully.")
