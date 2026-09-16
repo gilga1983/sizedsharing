@@ -46,10 +46,8 @@ if "systems.comodal.collision.cache.CollisionBuilder" not in collision_text:
     raise RuntimeError("Historical CollisionPolicy.java did not match expected dependency")
 collision_policy.unlink()
 
-# Minimal elastic-buffer switch. Window turnover is deliberately identical to
-# historical sized W-TinyLFU: after every insertion it drains until
-# sizeWindow <= maxWindow. Elasticity acts only on physical Main placement, so
-# byte slack left by variable-sized Window packing can be consumed by Main.
+# Elasticity changes physical byte placement only. Window turnover, object-size
+# eligibility, and TinyLFU/AV admission are kept at their historical semantics.
 replace_once(
     sized,
     '''  protected final boolean bump;\n  protected final boolean prune;  \n''',
@@ -76,26 +74,21 @@ replace_once(
     '''    } else {\n      throw new IllegalStateException();\n    }\n    sampleOccupancy();\n  }\n\n  /** Adds the entry to the admission window, evicting if necessary. */\n''',
 )
 
-# An object too large for historical Main may still fit under the single global
-# M-byte cap in elastic mode. This is a physical-capacity check only.
-replace_once(
-    sized,
-    '''    if (weight > (maxMain)) {\n      policyStats.recordRejection();\n      return;\n    }\n''',
-    '''    if (weight > (elasticBuffer ? maximumSize : maxMain)) {\n      policyStats.recordRejection();\n      return;\n    }\n''',
-)
-
-# Window candidate production is unchanged. The only difference is that a
-# detached candidate tests placement against total M bytes in elastic mode.
+# Candidate production and admission triggering use the historical nominal Main
+# boundary. Thus borrowable global slack never lets a candidate bypass AV.
 replace_once(
     sized,
     '''  private void evict() {\n    final Node headCandidates = new Node();\n    collectCandidates(headCandidates);\n    while (headCandidates.prev != headCandidates) {\n      Node candidate = headCandidates.prev;\n      candidate.remove();\n      if ((sizeData + candidate.weight - sizeWindow) > maxMain) {\n        coreEviction(candidate);\n      } else {\n        admit(candidate);\n      }\n    }\n  }\n''',
-    '''  private void evict() {\n    final Node headCandidates = new Node();\n    collectCandidates(headCandidates);\n    while (headCandidates.prev != headCandidates) {\n      Node candidate = headCandidates.prev;\n      candidate.remove();\n      if (candidateExceedsCapacity(candidate)) {\n        coreEviction(candidate);\n      } else {\n        admit(candidate);\n      }\n    }\n\n    if (elasticBuffer) {\n      // If Window needs bytes currently borrowed by Main, Main yields until the\n      // single global M-byte capacity is restored.\n      while (sizeData > maximumSize) {\n        checkState((sizeData - sizeWindow) > 0);\n        victimsCount++;\n        evictNode(getVictim());\n      }\n    }\n  }\n''',
+    '''  private void evict() {\n    final Node headCandidates = new Node();\n    collectCandidates(headCandidates);\n    while (headCandidates.prev != headCandidates) {\n      Node candidate = headCandidates.prev;\n      candidate.remove();\n      if (candidateExceedsNominalMain(candidate)) {\n        coreEviction(candidate);\n      } else {\n        admit(candidate);\n      }\n    }\n\n    if (elasticBuffer) {\n      // Window keeps its historical reservation. If Main had borrowed Window\n      // slack and a later Window insertion reclaims it, Main yields only the\n      // bytes physically required to restore the single global M-byte cap.\n      while (sizeData > maximumSize) {\n        checkState((sizeData - sizeWindow) > 0);\n        victimsCount++;\n        evictNode(getVictim());\n      }\n    }\n  }\n''',
 )
 
+# The base policy still compares against the historical victim whenever nominal
+# Main capacity says admission is required. After a win, elastic mode may avoid
+# the physical eviction if Window slack can hold both objects.
 replace_once(
     sized,
     '''  protected void coreEviction(Node candidate) {\n    Node victim = getVictim();\n    victimsCount++;\n    if (compare(sketch.frequency(candidate.key), candidate.weight, sketch.frequency(victim.key), victim.weight)) {\n      victimsCount--;\n      while ((sizeData + candidate.weight - sizeWindow) > maxMain) {\n        Node evict = getVictim();\n        victimsCount++;\n        evictNode(evict);\n      }\n      admit(candidate);\n    } else {\n''',
-    '''  protected void coreEviction(Node candidate) {\n    long bytesNeeded = bytesNeededForCandidate(candidate);\n    if (elasticBuffer && bytesNeeded > (sizeData - sizeWindow)) {\n      reject(candidate);\n      return;\n    }\n    Node victim = getVictim();\n    victimsCount++;\n    if (compare(sketch.frequency(candidate.key), candidate.weight, sketch.frequency(victim.key), victim.weight)) {\n      victimsCount--;\n      while (candidateExceedsCapacity(candidate)) {\n        Node evict = getVictim();\n        victimsCount++;\n        evictNode(evict);\n      }\n      admit(candidate);\n    } else {\n''',
+    '''  protected void coreEviction(Node candidate) {\n    Node victim = getVictim();\n    victimsCount++;\n    if (compare(sketch.frequency(candidate.key), candidate.weight, sketch.frequency(victim.key), victim.weight)) {\n      victimsCount--;\n      while (candidateExceedsPhysicalCapacity(candidate)) {\n        Node evict = getVictim();\n        victimsCount++;\n        evictNode(evict);\n      }\n      admit(candidate);\n    } else {\n''',
 )
 
 # Keep the historical Window rule exactly: whenever it exceeds its reservation,
@@ -103,7 +96,7 @@ replace_once(
 replace_once(
     sized,
     '''  private void collectCandidates(final Node headCandidates) {\n    while (sizeWindow > maxWindow) {\n      Node candidate = headWindow.next;\n      candidate.status = Status.PROBATION;\n      sizeWindow -= candidate.weight;\n      sizeData -= candidate.weight;\n      candidate.remove();\n      candidate.appendToTail(headCandidates);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
-    '''  private void collectCandidates(final Node headCandidates) {\n    while (sizeWindow > maxWindow) {\n      Node candidate = headWindow.next;\n      candidate.status = Status.PROBATION;\n      sizeWindow -= candidate.weight;\n      sizeData -= candidate.weight;\n      candidate.remove();\n      candidate.appendToTail(headCandidates);\n    }\n  }\n\n  /** True if admitting this detached Window candidate would exceed capacity. */\n  protected boolean candidateExceedsCapacity(Node candidate) {\n    if (elasticBuffer) {\n      return (sizeData + candidate.weight) > maximumSize;\n    }\n    return (sizeData + candidate.weight - sizeWindow) > maxMain;\n  }\n\n  /** Bytes that really must be reclaimed before this candidate can be placed. */\n  protected long bytesNeededForCandidate(Node candidate) {\n    if (elasticBuffer) {\n      return Math.max(0L, (sizeData + candidate.weight) - maximumSize);\n    }\n    return Math.max(0L, (sizeData + candidate.weight - sizeWindow) - maxMain);\n  }\n\n  private void sampleOccupancy() {\n    long mainSize = sizeData - sizeWindow;\n    occupancySamples++;\n    totalOccupancySum += sizeData;\n    windowOccupancySum += sizeWindow;\n    mainOccupancySum += mainSize;\n\n    long windowBorrow = Math.max(0L, sizeWindow - maxWindow);\n    long mainBorrow = Math.max(0L, mainSize - maxMain);\n    if (windowBorrow > 0) {\n      windowBorrowSamples++;\n      maxWindowBorrowBytes = Math.max(maxWindowBorrowBytes, windowBorrow);\n    }\n    if (mainBorrow > 0) {\n      mainBorrowSamples++;\n      maxMainBorrowBytes = Math.max(maxMainBorrowBytes, mainBorrow);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
+    '''  private void collectCandidates(final Node headCandidates) {\n    while (sizeWindow > maxWindow) {\n      Node candidate = headWindow.next;\n      candidate.status = Status.PROBATION;\n      sizeWindow -= candidate.weight;\n      sizeData -= candidate.weight;\n      candidate.remove();\n      candidate.appendToTail(headCandidates);\n    }\n  }\n\n  /** Historical logical admission boundary: the nominal Main reservation. */\n  protected boolean candidateExceedsNominalMain(Node candidate) {\n    return (sizeData + candidate.weight - sizeWindow) > maxMain;\n  }\n\n  /** Historical number of victim bytes AV must evaluate for this candidate. */\n  protected long logicalBytesNeededForCandidate(Node candidate) {\n    return Math.max(0L, (sizeData + candidate.weight - sizeWindow) - maxMain);\n  }\n\n  /** Physical placement boundary after admission has already been decided. */\n  protected boolean candidateExceedsPhysicalCapacity(Node candidate) {\n    if (elasticBuffer) {\n      return (sizeData + candidate.weight) > maximumSize;\n    }\n    return candidateExceedsNominalMain(candidate);\n  }\n\n  /** Physical victim bytes actually required after the candidate wins AV. */\n  protected long physicalBytesNeededForCandidate(Node candidate) {\n    if (elasticBuffer) {\n      return Math.max(0L, (sizeData + candidate.weight) - maximumSize);\n    }\n    return logicalBytesNeededForCandidate(candidate);\n  }\n\n  private void sampleOccupancy() {\n    long mainSize = sizeData - sizeWindow;\n    occupancySamples++;\n    totalOccupancySum += sizeData;\n    windowOccupancySum += sizeWindow;\n    mainOccupancySum += mainSize;\n\n    long windowBorrow = Math.max(0L, sizeWindow - maxWindow);\n    long mainBorrow = Math.max(0L, mainSize - maxMain);\n    if (windowBorrow > 0) {\n      windowBorrowSamples++;\n      maxWindowBorrowBytes = Math.max(maxWindowBorrowBytes, windowBorrow);\n    }\n    if (mainBorrow > 0) {\n      mainBorrowSamples++;\n      maxMainBorrowBytes = Math.max(maxMainBorrowBytes, mainBorrow);\n    }\n  }\n  \n  protected Node getVictim() {\n''',
 )
 
 # Report measurement-only occupancy data in a machine-readable line. This is
@@ -121,8 +114,9 @@ replace_once(
     '''    public boolean prune() {\n      return config().getBoolean("sized-window-tiny-lfu.prune");\n    }\n    public boolean elasticBuffer() {\n      return config().getBoolean("sized-window-tiny-lfu.elastic-buffer");\n    }\n  }\n}\n''',
 )
 
-# AV remains lambda=1. The victim bytes required are determined by the physical
-# capacity boundary: historical maxMain in fixed mode, shared global M in elastic.
+# AV stays lambda=1 and evaluates exactly the historical logical victim set,
+# based on overflow beyond nominal Main. Only after the candidate wins do we
+# ask how many of those victim bytes must physically leave under the shared M.
 replace_once(
     sum_sized,
     '''    String name = String.format("sketch.sized." + (scaled ? "Scaled" : "") \n        + "SumWindowTinyLfu (%.0f%%)", 100 * (1.0d - percentMain));\n''',
@@ -131,8 +125,8 @@ replace_once(
 
 replace_once(
     sum_sized,
-    '''    long sizeNeeded = (sizeData + candidate.weight - sizeWindow) - maxMain;\n    int victimsSize = 0;\n''',
-    '''    long sizeNeeded = bytesNeededForCandidate(candidate);\n    if (elasticBuffer && sizeNeeded > (sizeData - sizeWindow)) {\n      reject(candidate);\n      return;\n    }\n    int victimsSize = 0;\n''',
+    '''    long sizeNeeded = (sizeData + candidate.weight - sizeWindow) - maxMain;\n    int victimsSize = 0;\n    int victimsNum = 0;\n    int victimsFreq = 0;\n    Node victim = headProbation;\n    while (victimsSize < sizeNeeded) {\n      if (victim.next != headProbation) {\n        victim = victim.next;\n      } else {\n        victim = headProtected.next;\n      }\n      victimsSize += victim.weight;\n      victimsNum++;\n      victimsFreq += sketch.frequency(victim.key);\n      if (prune && victimsFreq > candidateFreq) {\n        break;\n      }\n    }\n    victimsCount += victimsNum;\n    if (!compare(candidateFreq, candidate.weight, victimsFreq, victimsSize)) {\n       reject(candidate);\n       if (bump) {\n         for (int i = 0; i < victimsNum; i++) {\n           promote(getVictim());\n         }\n       }\n    } else {\n      for (int i = 0; i < victimsNum; i++) {\n        Node evict = getVictim();\n        evictNode(evict);\n      }\n      admit(candidate);\n    }    \n''',
+    '''    long logicalSizeNeeded = logicalBytesNeededForCandidate(candidate);\n    int victimsSize = 0;\n    int victimsNum = 0;\n    int victimsFreq = 0;\n    Node victim = headProbation;\n    while (victimsSize < logicalSizeNeeded) {\n      if (victim.next != headProbation) {\n        victim = victim.next;\n      } else {\n        victim = headProtected.next;\n      }\n      victimsSize += victim.weight;\n      victimsNum++;\n      victimsFreq += sketch.frequency(victim.key);\n      if (prune && victimsFreq > candidateFreq) {\n        break;\n      }\n    }\n    victimsCount += victimsNum;\n    if (!compare(candidateFreq, candidate.weight, victimsFreq, victimsSize)) {\n       reject(candidate);\n       if (bump) {\n         for (int i = 0; i < victimsNum; i++) {\n           promote(getVictim());\n         }\n       }\n    } else {\n      long physicalSizeNeeded = physicalBytesNeededForCandidate(candidate);\n      long reclaimed = 0L;\n      while (reclaimed < physicalSizeNeeded) {\n        Node evict = getVictim();\n        reclaimed += evict.weight;\n        evictNode(evict);\n      }\n      admit(candidate);\n    }    \n''',
 )
 
 replace_once(
@@ -141,4 +135,4 @@ replace_once(
     '''  sized-window-tiny-lfu {\n    scaled = false\n    bump = false\n    prune = true\n    elastic-buffer = false\n  }\n''',
 )
 
-print("Applied simulator compatibility fixes and Window-invariant elastic sharing successfully.")
+print("Applied simulator compatibility fixes and admission-preserving elastic sharing successfully.")
