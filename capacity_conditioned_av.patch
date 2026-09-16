@@ -1,0 +1,76 @@
+diff --git a/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SizedWindowTinyLfuPolicy.java b/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SizedWindowTinyLfuPolicy.java
+--- a/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SizedWindowTinyLfuPolicy.java
++++ b/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SizedWindowTinyLfuPolicy.java
+@@
+     public boolean prune() {
+       return config().getBoolean("sized-window-tiny-lfu.prune");
+     }
++    public double admissionMultiplier() {
++      return config().getDouble("sized-window-tiny-lfu.admission-multiplier");
++    }
+   }
+ }
+diff --git a/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SumSizedWindowTinyLfuPolicy.java b/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SumSizedWindowTinyLfuPolicy.java
+--- a/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SumSizedWindowTinyLfuPolicy.java
++++ b/simulator/src/main/java/com/github/benmanes/caffeine/cache/simulator/policy/sketch/sized/SumSizedWindowTinyLfuPolicy.java
+@@
+ public final class SumSizedWindowTinyLfuPolicy extends SizedWindowTinyLfuPolicy {
++  private final double admissionMultiplier;
+ 
+   public SumSizedWindowTinyLfuPolicy(double percentMain, SizedWindowTinyLfuSettings settings) {
+     super(percentMain, settings);
++    this.admissionMultiplier = settings.admissionMultiplier();
+     String name = String.format("sketch.sized." + (scaled ? "Scaled" : "") 
+-        + "SumWindowTinyLfu (%.0f%%)", 100 * (1.0d - percentMain));
++        + "SumWindowTinyLfu (%.0f%%, lambda=%.2f)",
++        100 * (1.0d - percentMain), admissionMultiplier);
+     policyStats.setName(name);
+   }
+@@
+       victimsSize += victim.weight;
+       victimsNum++;
+       victimsFreq += sketch.frequency(victim.key);
+-      if (prune && victimsFreq > candidateFreq) {
++      if (prune && candidateFreq < (admissionMultiplier * victimsFreq)) {
+         break;
+       }
+     }
+     victimsCount += victimsNum;
+-    if (!compare(candidateFreq, candidate.weight, victimsFreq, victimsSize)) {
++    if (!compareAggregate(candidateFreq, candidate.weight, victimsFreq, victimsSize)) {
+        reject(candidate);
+        if (bump) {
+          for (int i = 0; i < victimsNum; i++) {
+@@
+       admit(candidate);
+     }    
+   }
++
++  /**
++   * Applies a tunable exchange rate to the aggregate victim score.
++   *
++   * lambda = 1.0 is routed through the original comparison function so the
++   * historical AV behavior is preserved exactly.
++   */
++  private boolean compareAggregate(int candidateFreq, int candidateWeight,
++      int victimsFreq, int victimsWeight) {
++    if (admissionMultiplier == 1.0d) {
++      return compare(candidateFreq, candidateWeight, victimsFreq, victimsWeight);
++    }
++    if (scaled) {
++      return ((double) candidateFreq * victimsWeight)
++          > (admissionMultiplier * victimsFreq * candidateWeight);
++    }
++    return candidateFreq >= (admissionMultiplier * victimsFreq);
++  }
+ }
+diff --git a/simulator/src/main/resources/reference.conf b/simulator/src/main/resources/reference.conf
+--- a/simulator/src/main/resources/reference.conf
++++ b/simulator/src/main/resources/reference.conf
+@@
+   sized-window-tiny-lfu {
+     scaled = false
+     bump = false
+     prune = true
++    admission-multiplier = 1.0
+   }
