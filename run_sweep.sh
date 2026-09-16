@@ -8,14 +8,16 @@ CAPACITY_FRACTIONS="${CAPACITY_FRACTIONS:-0.005 0.01 0.02 0.05 0.10 0.20 0.40}"
 REQUESTS=1000000
 TRACE=""
 DOWNLOAD_WIKI=0
+SYNTHETIC=0
 
 usage() {
-  echo "Usage: $0 [--trace FILE] [--download-wiki] [--requests N]"
+  echo "Usage: $0 [--trace FILE | --synthetic | --download-wiki] [--requests N]"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --trace) TRACE="$2"; shift 2 ;;
+    --synthetic) SYNTHETIC=1; shift ;;
     --download-wiki) DOWNLOAD_WIKI=1; shift ;;
     --requests) REQUESTS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -27,6 +29,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$ROOT/work"
 RESULTS="$ROOT/results"
 mkdir -p "$WORK" "$RESULTS"
+
+if [[ $SYNTHETIC -eq 1 ]]; then
+  TRACE="$WORK/synthetic_${REQUESTS}.tr"
+  python3 "$ROOT/generate_synthetic.py" --output "$TRACE" --requests "$REQUESTS"
+fi
 
 if [[ $DOWNLOAD_WIKI -eq 1 ]]; then
   TRACE="$WORK/wiki2018_${REQUESTS}.tr"
@@ -45,7 +52,7 @@ if [[ $DOWNLOAD_WIKI -eq 1 ]]; then
 fi
 
 if [[ -z "$TRACE" || ! -s "$TRACE" ]]; then
-  echo "A trace is required. Use --trace FILE or --download-wiki."
+  echo "A trace is required. Use --trace FILE, --synthetic, or --download-wiki."
   exit 2
 fi
 TRACE="$(cd "$(dirname "$TRACE")" && pwd)/$(basename "$TRACE")"
@@ -55,14 +62,12 @@ if [[ ! -d "$SRC/.git" ]]; then
   git clone "$UPSTREAM_REPO" "$SRC"
 fi
 git -C "$SRC" fetch origin "$UPSTREAM_REF"
-git -C "$SRC" checkout -f "$UPSTREAM_REF"
-git -C "$SRC" reset --hard "origin/$UPSTREAM_REF" 2>/dev/null || true
+git -C "$SRC" checkout -B "$UPSTREAM_REF" "origin/$UPSTREAM_REF"
 git -C "$SRC" clean -fdx
 
 echo "[patch] applying capacity-conditioned AV"
 git -C "$SRC" apply "$ROOT/capacity_conditioned_av.patch"
 
-# Compute the unique-byte footprint using the last observed size for each object id.
 read -r UNIQUE_BYTES REQUEST_COUNT <<< "$(python3 - "$TRACE" <<'PY'
 import sys
 path = sys.argv[1]
@@ -97,20 +102,9 @@ PY
   echo "$F,$CAP" >> "$CAP_META"
 done
 
-COMMON=(
-  "-Dcaffeine.simulator.files.format=adapt-size"
-  "-Dcaffeine.simulator.files.paths.0=$TRACE"
-  "-Dcaffeine.simulator.policies.0=sketch.SumSizedWindowTinyLfu"
-  "-Dcaffeine.simulator.admission.0=Always"
-  "-Dcaffeine.simulator.sized-window-tiny-lfu.scaled=false"
-  "-Dcaffeine.simulator.sized-window-tiny-lfu.bump=true"
-  "-Dcaffeine.simulator.sized-window-tiny-lfu.prune=true"
-  "-Dcaffeine.simulator.window-tiny-lfu.percent-main.0=0.99"
-  "-Dcaffeine.simulator.report.format=csv"
-  "-Dcaffeine.simulator.report.ascending=false"
-)
+APP_CONF="$SRC/simulator/src/main/resources/application.conf"
 
-echo "[build] compiling simulator once"
+echo "[build] compiling patched simulator"
 (cd "$SRC" && ./gradlew simulator:classes)
 
 while IFS=, read -r F CAP; do
@@ -119,14 +113,45 @@ while IFS=, read -r F CAP; do
     TAG="f${F}_c${CAP}_l${L}"
     OUT="$RESULTS/${TAG}.csv"
     echo "[run] fraction=$F capacity=$CAP lambda=$L"
-    (
-      cd "$SRC"
-      ./gradlew simulator:run -q \
-        "${COMMON[@]}" \
-        "-Dcaffeine.simulator.maximum-size=$CAP" \
-        "-Dcaffeine.simulator.sized-window-tiny-lfu.admission-multiplier=$L" \
-        "-Dcaffeine.simulator.report.output=$OUT"
-    )
+
+    cat > "$APP_CONF" <<EOF
+caffeine {
+  simulator {
+    source = "files"
+    files {
+      paths = ["$TRACE"]
+      format = "adapt-size"
+    }
+    tiny-lfu {
+      count-min {
+        lazy = true
+      }
+    }
+    sized-window-tiny-lfu {
+      scaled = false
+      bump = true
+      prune = true
+      admission-multiplier = $L
+    }
+    window-tiny-lfu {
+      percent-main = [0.99]
+      percent-main-protected = 0.80
+    }
+    maximum-size = $CAP
+    policies = ["sketch.SumSizedWindowTinyLfu"]
+    admission = ["Always"]
+    report {
+      format = "csv"
+      output = "$OUT"
+      sort-by = "policy"
+      ascending = true
+    }
+  }
+}
+EOF
+
+    (cd "$SRC" && ./gradlew simulator:run -q)
+
     printf '{"fraction": %s, "capacity_bytes": %s, "lambda": %s, "csv": "%s"}\n' \
       "$F" "$CAP" "$L" "$(basename "$OUT")" > "$RESULTS/${TAG}.json"
   done
